@@ -92,19 +92,19 @@ def remove_zipped_logs():
             except Exception as e:
                 logging.error(f"Error removing zipped log file {zipped_log}: {e}")
 
-def delete_large_logs():
+def truncate_large_logs():
     log_files = find_log_files()
     for log_file in log_files:
         try:
             if os.path.getsize(log_file) > MAX_LOG_SIZE:
-                os.remove(log_file)
-                logging.info(f"Removed large log file: {log_file}")
+                open(log_file, 'w').close()  # Truncate the file
+                logging.info(f"Truncated large log file: {log_file}")
         except Exception as e:
-            logging.error(f"Error checking/deleting log file {log_file}: {e}")
+            logging.error(f"Error checking/truncating log file {log_file}: {e}")
 
 def monitor_logs():
     remove_zipped_logs()
-    delete_large_logs()
+    truncate_large_logs()
 
 def manage_usb_drives():
     drives = detect_usb_drives()
