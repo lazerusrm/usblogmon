@@ -9,7 +9,7 @@ import glob
 import requests
 import hashlib
 import sys
-
+  
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
