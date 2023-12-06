@@ -5,11 +5,11 @@ import subprocess
 import pyudev
 import logging
 import time
-import glob
+import fnmatch
 import requests
 import hashlib
 import sys
-  
+
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -74,37 +74,29 @@ def mount_drive(partition, mount_point):
         logging.info(f"Mounted {partition} at {mount_point}")
     except Exception as e:
         logging.error(f"Failed to mount {partition}: {e}")
+        
 def find_log_files():
     log_files = []
+    patterns = ['*.gz', '*.1', '*syslog*', '*.log']  # Patterns to match
     for log_dir in LOG_DIRS:
         for root, dirs, files in os.walk(log_dir):
-            for file in files:
-                if file.endswith(".log"):
+            for pattern in patterns:
+                for file in fnmatch.filter(files, pattern):
                     log_files.append(os.path.join(root, file))
     return log_files
-
-def remove_zipped_logs():
-    for log_dir in LOG_DIRS:
-        for zipped_log in glob.glob(os.path.join(log_dir, '*.gz')):
-            try:
-                os.remove(zipped_log)
-                logging.info(f"Removed zipped log file: {zipped_log}")
-            except Exception as e:
-                logging.error(f"Error removing zipped log file {zipped_log}: {e}")
-
-def truncate_large_logs():
+    
+def delete_large_logs():
     log_files = find_log_files()
     for log_file in log_files:
         try:
             if os.path.getsize(log_file) > MAX_LOG_SIZE:
-                open(log_file, 'w').close()  # Truncate the file
-                logging.info(f"Truncated large log file: {log_file}")
+                os.remove(log_file)
+                logging.info(f"Deleted large log file: {log_file}")
         except Exception as e:
-            logging.error(f"Error checking/truncating log file {log_file}: {e}")
+            logging.error(f"Error checking/deleting log file {log_file}: {e}")
 
 def monitor_logs():
-    remove_zipped_logs()
-    truncate_large_logs()
+    delete_large_logs()
 
 def manage_usb_drives():
     drives = detect_usb_drives()
