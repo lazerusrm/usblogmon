@@ -144,7 +144,7 @@ def update_script():
         logging.error(f"Error while checking for updates: {e}")
 
 def main():
-    last_log_update = time.time()
+    last_log_update = time.time() - LOG_UPDATE_INTERVAL  # Forces immediate log check on first run
     last_script_update = time.time()
 
     while True:
@@ -164,6 +164,7 @@ def main():
             last_script_update = current_time
 
         time.sleep(USB_SCAN_INTERVAL)  # Wait for 3 minutes before next USB scan
+
 
 
 if __name__ == "__main__":
