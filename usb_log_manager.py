@@ -11,12 +11,14 @@ import hashlib
 import sys
 
 # Logging setup
-logging.basicConfig(level=logging.INFO, format=''%(asctime)s - %(levelname)s - %(message)s'')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Constants
 LOG_DIRS = ["/var/log"]
 MAX_LOG_SIZE = 20 * 10**6  # 20 MB
 GITHUB_SCRIPT_URL = "https://raw.githubusercontent.com/lazerusrm/usblogmon/main/usb_log_manager.py"
+USB_SCAN_INTERVAL = 180  # 3 minutes in seconds
+LOG_UPDATE_INTERVAL = 86400  # 24 hours in seconds
 
 def detect_usb_drives():
     context = pyudev.Context()
@@ -124,11 +126,27 @@ def update_script():
         logging.error(f"Error while checking for updates: {e}")
 
 def main():
+    last_log_update = time.time()
+    last_script_update = time.time()
+
     while True:
+        current_time = time.time()
+
+        # Manage USB Drives
         manage_usb_drives()
-        monitor_logs()
-        update_script()
-        time.sleep(86400)  # Wait for 1 day (86400 seconds) before next update check
+
+        # Check for log updates every 24 hours
+        if current_time - last_log_update >= LOG_UPDATE_INTERVAL:
+            monitor_logs()
+            last_log_update = current_time
+
+        # Check for script updates every 24 hours
+        if current_time - last_script_update >= LOG_UPDATE_INTERVAL:
+            update_script()
+            last_script_update = current_time
+
+        time.sleep(USB_SCAN_INTERVAL)  # Wait for 3 minutes before next USB scan
+
 
 if __name__ == "__main__":
     main()
