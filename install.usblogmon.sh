@@ -13,10 +13,13 @@ SCRIPT_NAME="usb_log_manager.py"
 INSTALL_DIR="/opt/usblogmon"
 SERVICE_FILE="/etc/systemd/system/usblogmon.service"
 
+# Update package list
+echo "Updating package list..."
+apt-get update
+
 # Check for Python3 and install if not exists
 if ! command -v python3 &> /dev/null; then
     echo "Python3 is not installed. Installing Python3..."
-    apt-get update
     apt-get install python3 -y
 fi
 
