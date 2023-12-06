@@ -32,19 +32,23 @@ def detect_usb_drives():
 
 def get_partitions(drive):
     try:
-        result = subprocess.run(["lsblk", "-b", "-o", "NAME,SIZE", "-n", drive], capture_output=True, text=True, check=True)
+        # Use '-o NAME' to get a plain list of device names
+        # Use '-l' to list the information as lines
+        result = subprocess.run(["lsblk", "-l", "-n", "-o", "NAME", drive], capture_output=True, text=True, check=True)
         output = result.stdout.strip().split('\n')
     except subprocess.CalledProcessError as e:
         logging.error(f"Error getting partitions for {drive}: {e}")
         return []
 
     partitions = []
-    for line in output[1:]:
-        parts = line.strip().split()
-        if len(parts) == 2:
-            partition, size = parts
-            if int(size) >= 100 * 10**9:
-                partitions.append("/dev/" + partition)
+    for line in output:
+        partition = "/dev/" + line.strip()
+        try:
+            size = int(subprocess.run(["blockdev", "--getsize64", partition], capture_output=True, text=True, check=True).stdout.strip())
+            if size >= 100 * 10**9:
+                partitions.append(partition)
+        except subprocess.CalledProcessError:
+            continue  # Skip if blockdev fails (e.g., for the main device)
 
     return partitions
 
