@@ -8,7 +8,7 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 # Define variables
-REPO_URL="https://github.com/lazerusrm/usblogmon"
+REPO_URL="https://raw.githubusercontent.com/lazerusrm/usblogmon/main"
 SCRIPT_NAME="usb_log_manager.py"
 INSTALL_DIR="/opt/usblogmon"
 SERVICE_FILE="/etc/systemd/system/usblogmon.service"
@@ -45,7 +45,7 @@ chown $USER:$USER $INSTALL_DIR
 
 # Download the script from GitHub
 echo "Downloading the script from $REPO_URL"
-curl -o $INSTALL_DIR/$SCRIPT_NAME "$REPO_URL/raw/main/$SCRIPT_NAME"
+curl -o $INSTALL_DIR/$SCRIPT_NAME "$REPO_URL/$SCRIPT_NAME"
 
 # Make the script executable
 chmod +x $INSTALL_DIR/$SCRIPT_NAME
