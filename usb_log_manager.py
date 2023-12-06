@@ -48,7 +48,20 @@ def get_partitions(drive):
 
     return partitions
 
+def is_mounted(partition):
+    try:
+        # Use 'findmnt' to check if the partition is already mounted
+        subprocess.run(["findmnt", partition], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except subprocess.CalledProcessError:
+        # If 'findmnt' fails, the partition is not mounted
+        return False
+
 def mount_drive(partition, mount_point):
+    if is_mounted(partition):
+        logging.info(f"{partition} is already mounted.")
+        return
+
     try:
         os.makedirs(mount_point, exist_ok=True)
         subprocess.run(["mount", partition, mount_point], check=True)
