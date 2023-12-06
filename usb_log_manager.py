@@ -33,7 +33,6 @@ def detect_usb_drives():
 def get_partitions(drive):
     try:
         # Use '-o NAME' to get a plain list of device names
-        # Use '-l' to list the information as lines
         result = subprocess.run(["lsblk", "-l", "-n", "-o", "NAME", drive], capture_output=True, text=True, check=True)
         output = result.stdout.strip().split('\n')
     except subprocess.CalledProcessError as e:
@@ -41,14 +40,17 @@ def get_partitions(drive):
         return []
 
     partitions = []
+    drive_name = os.path.basename(drive)
     for line in output:
-        partition = "/dev/" + line.strip()
-        try:
-            size = int(subprocess.run(["blockdev", "--getsize64", partition], capture_output=True, text=True, check=True).stdout.strip())
-            if size >= 100 * 10**9:
-                partitions.append(partition)
-        except subprocess.CalledProcessError:
-            continue  # Skip if blockdev fails (e.g., for the main device)
+        partition = line.strip()
+        if partition != drive_name:  # Skip the main drive
+            partition_path = "/dev/" + partition
+            try:
+                size = int(subprocess.run(["blockdev", "--getsize64", partition_path], capture_output=True, text=True, check=True).stdout.strip())
+                if size >= 100 * 10**9:
+                    partitions.append(partition_path)
+            except subprocess.CalledProcessError:
+                continue  # Skip if blockdev fails
 
     return partitions
 
@@ -72,7 +74,6 @@ def mount_drive(partition, mount_point):
         logging.info(f"Mounted {partition} at {mount_point}")
     except Exception as e:
         logging.error(f"Failed to mount {partition}: {e}")
-
 def find_log_files():
     log_files = []
     for log_dir in LOG_DIRS:
