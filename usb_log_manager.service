@@ -1,0 +1,9 @@
+[Unit]
+Description=USB Drive and Log File Manager
+
+[Service]
+ExecStart=/usr/local/bin/usb_log_manager.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
