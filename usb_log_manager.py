@@ -10,6 +10,7 @@ import requests
 import hashlib
 import sys
 import re
+import json
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,6 +21,26 @@ MAX_LOG_SIZE = 20 * 10**6  # 20 MB
 GITHUB_SCRIPT_URL = "https://raw.githubusercontent.com/lazerusrm/usblogmon/main/usb_log_manager.py"
 USB_SCAN_INTERVAL = 180  # 3 minutes in seconds
 LOG_UPDATE_INTERVAL = 86400  # 24 hours in seconds
+CONFIG_FILE_PATH = "/opt/usblogmon/config.json"  # Update this path as needed
+
+def load_config():
+    try:
+        with open(CONFIG_FILE_PATH, 'r') as file:
+            return json.load(file)
+    except FileNotFoundError:
+        return {}
+
+def save_config(config):
+    with open(CONFIG_FILE_PATH, 'w') as file:
+        json.dump(config, file, indent=4)
+
+def is_boot_drive(drive):
+    try:
+        mount_info = subprocess.run(['findmnt', '-n', '-o', 'SOURCE', '/'], capture_output=True, text=True).stdout.strip()
+        return drive in mount_info
+    except subprocess.CalledProcessError:
+        logging.error("Error determining the boot drive.")
+        return False
 
 def read_fstab():
     fstab_entries = {}
@@ -55,7 +76,6 @@ def detect_usb_drives():
 
 def get_partitions(drive):
     try:
-        # Use '-o NAME' to get a plain list of device names
         result = subprocess.run(["lsblk", "-l", "-n", "-o", "NAME", drive], capture_output=True, text=True, check=True)
         output = result.stdout.strip().split('\n')
     except subprocess.CalledProcessError as e:
@@ -79,11 +99,9 @@ def get_partitions(drive):
 
 def is_mounted(partition):
     try:
-        # Use 'findmnt' to check if the partition is already mounted
         subprocess.run(["findmnt", partition], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except subprocess.CalledProcessError:
-        # If 'findmnt' fails, the partition is not mounted
         return False
 
 def mount_drive(partition, mount_point):
@@ -97,6 +115,22 @@ def mount_drive(partition, mount_point):
         logging.info(f"Mounted {partition} at {mount_point}")
     except Exception as e:
         logging.error(f"Failed to mount {partition}: {e}")
+
+def manage_drives():
+    config = load_config()
+    drives = detect_usb_drives()  # Detect USB drives
+    other_drives = [d.device_node for d in pyudev.Context().list_devices(subsystem='block', DEVTYPE='disk') if not is_boot_drive(d.device_node)]
+
+    for drive in drives + other_drives:
+        partitions = get_partitions(drive)
+        for partition in partitions:
+            if not is_mounted(partition):
+                friendly_name = "drive_" + partition.split('/')[-1]
+                mount_point = f"/mnt/{friendly_name}"
+                mount_drive(partition, mount_point)
+                config[partition] = mount_point
+
+    save_config(config)
 
 def find_log_files():
     log_files = []
@@ -120,19 +154,6 @@ def delete_large_logs():
 
 def monitor_logs():
     delete_large_logs()
-
-def manage_usb_drives():
-    drives = detect_usb_drives()
-
-    if not drives:
-        logging.info("No USB drives detected.")
-
-    for drive in drives:
-        partitions = get_partitions(drive)
-        for partition in partitions:
-            friendly_name = "usb_drive_" + partition.split('/')[-1]
-            mount_point = f"/mnt/{friendly_name}"
-            mount_drive(partition, mount_point)
 
 def get_script_hash():
     with open(__file__, 'rb') as file:
@@ -159,14 +180,14 @@ def update_script():
         logging.error(f"Error while checking for updates: {e}")
 
 def main():
-    last_log_update = time.time() - LOG_UPDATE_INTERVAL  # Forces immediate log check on first run
+    last_log_update = time.time() - LOG_UPDATE_INTERVAL
     last_script_update = time.time()
 
     while True:
         current_time = time.time()
 
-        # Manage USB Drives
-        manage_usb_drives()
+        # Manage USB and other non-boot drives
+        manage_drives()
 
         # Check and mount drives from fstab
         check_and_mount_fstab_drives()
@@ -181,7 +202,7 @@ def main():
             update_script()
             last_script_update = current_time
 
-        time.sleep(USB_SCAN_INTERVAL)  # Wait for 3 minutes before next USB scan
+        time.sleep(USB_SCAN_INTERVAL)
 
 if __name__ == "__main__":
     main()
