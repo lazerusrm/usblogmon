@@ -26,9 +26,19 @@ CONFIG_FILE_PATH = "/opt/usblogmon/config.json"  # Update this path as needed
 def load_config():
     try:
         with open(CONFIG_FILE_PATH, 'r') as file:
-            return json.load(file)
+            content = file.read().strip()
+            return json.loads(content) if content else {}
     except FileNotFoundError:
+        logging.info(f"{CONFIG_FILE_PATH} not found. Creating a new config file.")
+        with open(CONFIG_FILE_PATH, 'w') as file:
+            json.dump({}, file, indent=4)
         return {}
+    except json.JSONDecodeError:
+        logging.error(f"Error reading JSON from {CONFIG_FILE_PATH}. Creating a new configuration.")
+        with open(CONFIG_FILE_PATH, 'w') as file:
+            json.dump({}, file, indent=4)
+        return {}
+
 
 def save_config(config):
     with open(CONFIG_FILE_PATH, 'w') as file:
