@@ -9,6 +9,7 @@ import fnmatch
 import requests
 import hashlib
 import sys
+import re
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -19,6 +20,28 @@ MAX_LOG_SIZE = 20 * 10**6  # 20 MB
 GITHUB_SCRIPT_URL = "https://raw.githubusercontent.com/lazerusrm/usblogmon/main/usb_log_manager.py"
 USB_SCAN_INTERVAL = 180  # 3 minutes in seconds
 LOG_UPDATE_INTERVAL = 86400  # 24 hours in seconds
+
+def read_fstab():
+    fstab_entries = {}
+    with open('/etc/fstab', 'r') as file:
+        for line in file:
+            if line.startswith('#') or not line.strip():
+                continue
+            parts = re.split(r'\s+', line.strip())
+            if len(parts) >= 2:
+                fstab_entries[parts[0]] = parts[1]  # device: mount_point
+    return fstab_entries
+
+def check_and_mount_fstab_drives():
+    fstab_entries = read_fstab()
+    mounted = subprocess.run(["mount"], capture_output=True, text=True).stdout
+
+    for device, mount_point in fstab_entries.items():
+        if device not in mounted:
+            try:
+                mount_drive(device, mount_point)  # Utilize existing mount_drive function
+            except Exception as e:
+                logging.error(f"Failed to mount {device} from fstab: {e}")
 
 def detect_usb_drives():
     context = pyudev.Context()
@@ -74,7 +97,7 @@ def mount_drive(partition, mount_point):
         logging.info(f"Mounted {partition} at {mount_point}")
     except Exception as e:
         logging.error(f"Failed to mount {partition}: {e}")
-        
+
 def find_log_files():
     log_files = []
     patterns = ['*.gz', '*.1', '*syslog*', '*.log']  # Patterns to match
@@ -84,7 +107,7 @@ def find_log_files():
                 for file in fnmatch.filter(files, pattern):
                     log_files.append(os.path.join(root, file))
     return log_files
-    
+
 def delete_large_logs():
     log_files = find_log_files()
     for log_file in log_files:
@@ -145,6 +168,9 @@ def main():
         # Manage USB Drives
         manage_usb_drives()
 
+        # Check and mount drives from fstab
+        check_and_mount_fstab_drives()
+
         # Check for log updates every 24 hours
         if current_time - last_log_update >= LOG_UPDATE_INTERVAL:
             monitor_logs()
@@ -156,8 +182,6 @@ def main():
             last_script_update = current_time
 
         time.sleep(USB_SCAN_INTERVAL)  # Wait for 3 minutes before next USB scan
-
-
 
 if __name__ == "__main__":
     main()
