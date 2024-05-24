@@ -1,5 +1,18 @@
 #!/bin/bash
 
+# Function to get the UUID of a device
+get_uuid() {
+    blkid -o value -s UUID "$1"
+}
+
+# Function to create a mount point
+create_mount_point() {
+    local uuid=$1
+    local mount_point="/mnt/drive_$uuid"
+    mkdir -p "$mount_point"
+    echo "$mount_point"
+}
+
 # Check if the script is running as root
 if [ "$(id -u)" != "0" ]; then
     echo "This script must be run as root. Trying to run with sudo..."
@@ -73,5 +86,17 @@ systemctl daemon-reload
 # Enable and start the new service
 systemctl enable usblogmon
 systemctl start usblogmon
+
+# Check for connected USB drives and mount them
+for dev in /dev/sd*1; do
+    uuid=$(get_uuid "$dev")
+    if [ -n "$uuid" ]; then
+        mount_point=$(create_mount_point "$uuid")
+        mount "$dev" "$mount_point"
+        echo "Mounted $dev at $mount_point"
+    else
+        echo "Could not get UUID for $dev"
+    fi
+done
 
 echo "Installation completed. The service is now running."
