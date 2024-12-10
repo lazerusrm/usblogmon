@@ -238,7 +238,6 @@ def is_mounted(partition):
         return False
 
 def approximate_size(size_bytes):
-    # Approximate the size in either GB or TB.
     gb = size_bytes / (10**9)
     if gb >= 1000:
         # Use TB
@@ -250,8 +249,54 @@ def approximate_size(size_bytes):
 def generate_mount_name(size_bytes, uuid):
     size_str = approximate_size(size_bytes)
     last4 = uuid[-4:] if len(uuid) >= 4 else uuid
-    # Format: d<size_str>-<last4>
     return f"d{size_str}-{last4}"
+
+def run_fsck(partition):
+    # Run e2fsck to try and fix the filesystem
+    # -f: Force checking
+    # -y: Assume yes to all fixes
+    # -p could be used for automatic repair but -y is more thorough for all yes answers
+    try:
+        run_command(["e2fsck", "-fy", partition], check=True)
+        logging.info(f"Filesystem check and repair completed for {partition}.")
+        return True
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Filesystem check (e2fsck) failed for {partition}: {e}")
+        return False
+
+def attempt_mount(partition, mount_point):
+    try:
+        run_command(["mount", mount_point], check=True)
+        logging.info(f"Mounted {partition} at {mount_point}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to mount {partition}: {e}")
+        return False
+
+def attempt_repair_and_remount(partition, mount_point):
+    # If filesystem is ext4, try fsck
+    fs_type = get_partition_fs_type(partition)
+    if fs_type == FS_TYPE:
+        logging.info(f"Attempting to repair filesystem on {partition}...")
+        if run_fsck(partition):
+            # Attempt mount again
+            if attempt_mount(partition, mount_point):
+                return True
+            else:
+                # If still fails after repair, reformat
+                logging.info(f"Mount still failing after repair, reformatting {partition}...")
+                format_partition(partition)
+                return attempt_mount(partition, mount_point)
+        else:
+            # fsck failed, reformat
+            logging.info(f"Filesystem repair failed for {partition}, reformatting...")
+            format_partition(partition)
+            return attempt_mount(partition, mount_point)
+    else:
+        # Not ext4, just reformat directly
+        logging.info(f"Partition {partition} not {FS_TYPE}, reformatting...")
+        format_partition(partition)
+        return attempt_mount(partition, mount_point)
 
 def mount_partition(partition, config, size_bytes):
     uuid = get_device_uuid(partition)
@@ -279,17 +324,15 @@ def mount_partition(partition, config, size_bytes):
             with open(fstab_file, 'a') as f:
                 f.write(f"UUID={uuid} {mount_point} {FS_TYPE} defaults,noatime 0 2\n")
 
-        try:
-            run_command(["mount", mount_point], check=True)
-            logging.info(f"Mounted {partition} ({uuid}) at {mount_point}")
-        except Exception as e:
-            logging.error(f"Failed to mount {partition}: {e}")
+        # Attempt to mount
+        if not attempt_mount(partition, mount_point):
+            # If initial mount fails, attempt repair strategies
+            attempt_repair_and_remount(partition, mount_point)
 
 def create_partition_and_format(drive):
     try:
         run_command(["parted", "-s", drive, "mklabel", "gpt"])
         run_command(["parted", "-s", drive, "mkpart", "primary", FS_TYPE, "0%", "100%"])
-        # After creation, wait for partition to appear
         time.sleep(2)
         partitions = get_partitions(drive)
         if partitions:
