@@ -15,33 +15,29 @@ import logging
 # Configuration
 # ============================================================
 
-# Logging setup: minimal logging to stdout to minimize writes
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-CONFIG_FILE_PATH = "/opt/usblogmon/config.json"   # Persistent config storage (adjust as needed)
+CONFIG_FILE_PATH = "/opt/usblogmon/config.json"   
 GITHUB_SCRIPT_URL = "https://raw.githubusercontent.com/lazerusrm/usblogmon/main/usb_log_manager.py"
 USB_SCAN_INTERVAL = 180           # Interval for rescanning USB drives (seconds)
-LOG_UPDATE_INTERVAL = 86400       # Interval for checking updates (24 hours)
+LOG_UPDATE_INTERVAL = 86400       # 24 hours
 MOUNTS = {
-    # Directory : (size_in_MB, mode if needed)
     "/var/log": (15, None),
     "/opt/networkoptix/mediaserver/var/log": (5, None),
     "/tmp": (30, "1777"),
 }
-
 JOURNALD_CONF = "/etc/systemd/journald.conf"
-MAX_TMPFS_TOTAL = 50  # MB total allowed across tmpfs mounts
-
+MAX_TMPFS_TOTAL = 50  # MB total allowed for tmpfs
 SERVICE_NAME = "networkoptix-mediaserver"
+SIZE_THRESHOLD = 512 * 10**9  # 512 GB in bytes
+FS_TYPE = "ext4"
+MOUNT_BASE = "/mnt"
 
 # ============================================================
 # Utility Functions
 # ============================================================
 
 def run_command(cmd, check=True, capture_output=True):
-    """
-    Run a shell command.
-    """
     return subprocess.run(cmd, check=check, capture_output=capture_output, text=True)
 
 def load_config():
@@ -50,7 +46,6 @@ def load_config():
             content = f.read().strip()
             return json.loads(content) if content else {}
     except (FileNotFoundError, json.JSONDecodeError):
-        # Create a new empty config if missing or invalid
         save_config({})
         return {}
 
@@ -68,9 +63,6 @@ def get_script_hash():
 # ============================================================
 
 def update_script():
-    """
-    Check if a newer version of the script is available. If yes, update and restart.
-    """
     logging.info("Checking for script updates...")
     try:
         response = requests.get(GITHUB_SCRIPT_URL, timeout=10)
@@ -90,13 +82,10 @@ def update_script():
         logging.error(f"Error while checking for updates: {e}")
 
 # ============================================================
-# Journald Configuration for Volatile Storage
+# Journald Configuration (Volatile)
 # ============================================================
 
 def configure_journald_volatile():
-    """
-    Configure systemd-journald to use volatile storage and disable compression/sealing.
-    """
     try:
         if os.path.exists(JOURNALD_CONF):
             with open(JOURNALD_CONF, 'r') as f:
@@ -111,7 +100,7 @@ def configure_journald_volatile():
                     new_lines.append("Seal=no\n")
                 else:
                     new_lines.append(line)
-            # Ensure settings exist if not found
+            # Ensure settings exist
             if not any(l.strip().startswith("Storage=") for l in new_lines):
                 new_lines.append("Storage=volatile\n")
             if not any(l.strip().startswith("Compress=") for l in new_lines):
@@ -125,14 +114,13 @@ def configure_journald_volatile():
             with open(JOURNALD_CONF, 'w') as f:
                 f.write("[Journal]\nStorage=volatile\nCompress=no\nSeal=no\n")
 
-        # Restart journald to apply changes
         run_command(["systemctl", "restart", "systemd-journald"])
         logging.info("systemd-journald configured for volatile storage and restarted.")
     except Exception as e:
         logging.error(f"Failed to configure journald: {e}")
 
 # ============================================================
-# Tmpfs Mount Management
+# Tmpfs Mounts
 # ============================================================
 
 def is_tmpfs_mounted(directory):
@@ -143,20 +131,13 @@ def is_tmpfs_mounted(directory):
         return False
 
 def configure_tmpfs(directory, size_mb, mode=None):
-    """
-    Configure a directory as tmpfs. Add to /etc/fstab if not present and mount it.
-    """
-    # Ensure directory exists
+    # Clean directory
     if os.path.exists(directory):
-        # Remove old contents if needed
-        try:
-            for root, dirs, files in os.walk(directory, topdown=False):
-                for name in files:
-                    os.remove(os.path.join(root, name))
-                for name in dirs:
-                    os.rmdir(os.path.join(root, name))
-        except Exception:
-            pass
+        for root, dirs, files in os.walk(directory, topdown=False):
+            for name in files:
+                os.remove(os.path.join(root, name))
+            for name in dirs:
+                os.rmdir(os.path.join(root, name))
     else:
         os.makedirs(directory, exist_ok=True)
 
@@ -169,7 +150,6 @@ def configure_tmpfs(directory, size_mb, mode=None):
     else:
         fstab_line += f",size={size_mb}M    0 0"
 
-    # Add to /etc/fstab if not already present
     fstab_file = "/etc/fstab"
     with open(fstab_file, 'r') as f:
         fstab_contents = f.read()
@@ -179,7 +159,6 @@ def configure_tmpfs(directory, size_mb, mode=None):
             f.write(fstab_line + "\n")
         logging.info(f"Added {directory} to /etc/fstab.")
 
-    # Mount if not mounted
     if not is_tmpfs_mounted(directory):
         run_command(["mount", directory], check=True)
         logging.info(f"Mounted {directory} as tmpfs with size={size_mb}M.")
@@ -187,9 +166,9 @@ def configure_tmpfs(directory, size_mb, mode=None):
 def check_total_tmpfs():
     total = sum(size for _, (size, _) in MOUNTS.items())
     if total > MAX_TMPFS_TOTAL:
-        raise ValueError(f"Total tmpfs allocation {total}MB exceeds the limit {MAX_TMPFS_TOTAL}MB.")
+        raise ValueError(f"Total tmpfs allocation {total}MB exceeds {MAX_TMPFS_TOTAL}MB.")
     else:
-        logging.info(f"Total tmpfs allocation {total}MB is within the {MAX_TMPFS_TOTAL}MB limit.")
+        logging.info(f"Total tmpfs allocation {total}MB is within limit.")
 
 def setup_tmpfs_mounts():
     check_total_tmpfs()
@@ -207,65 +186,49 @@ def is_boot_drive(drive):
     except:
         return False
 
-def read_fstab():
-    fstab_entries = {}
-    with open('/etc/fstab', 'r') as file:
-        for line in file:
-            if line.startswith('#') or not line.strip():
-                continue
-            parts = re.split(r'\s+', line.strip())
-            if len(parts) >= 2:
-                fstab_entries[parts[0]] = parts[1]
-    return fstab_entries
+def get_device_size(drive):
+    try:
+        size_str = run_command(["blockdev", "--getsize64", drive], check=True).stdout.strip()
+        return int(size_str)
+    except:
+        return 0
 
-def check_and_mount_fstab_drives():
-    fstab_entries = read_fstab()
-    mounted = run_command(["mount"]).stdout
-
-    for device, mount_point in fstab_entries.items():
-        if device in ["/tmp", "/var/log", "/opt/networkoptix/mediaserver/var/log"]:
-            # Skip tmpfs or already handled special mounts
-            continue
-        if device not in mounted:
-            mount_drive(device, mount_point)  # Attempt mount
-
-def detect_usb_drives():
+def list_block_devices():
     context = pyudev.Context()
-    usb_drives = []
+    disks = []
     for device in context.list_devices(subsystem='block', DEVTYPE='disk'):
-        if device.get('ID_BUS') == 'usb':
-            usb_drives.append(device.device_node)
-    return usb_drives
-
-def detect_other_drives():
-    context = pyudev.Context()
-    drives = []
-    for d in context.list_devices(subsystem='block', DEVTYPE='disk'):
-        if not is_boot_drive(d.device_node):
-            drives.append(d.device_node)
-    return drives
+        disks.append(device.device_node)
+    return disks
 
 def get_partitions(drive):
     try:
         result = run_command(["lsblk", "-l", "-n", "-o", "NAME", drive])
         output = result.stdout.strip().split('\n')
-    except subprocess.CalledProcessError:
+    except:
         return []
 
     partitions = []
     drive_name = os.path.basename(drive)
     for line in output:
         partition = line.strip()
-        if partition != drive_name:
-            partition_path = "/dev/" + partition
-            try:
-                size = int(run_command(["blockdev", "--getsize64", partition_path]).stdout.strip())
-                # For example, only mount if size >= 100GB (arbitrary logic retained from original)
-                if size >= 100 * 10**9:
-                    partitions.append(partition_path)
-            except:
-                continue
+        if partition and partition != drive_name:
+            partitions.append("/dev/" + partition)
     return partitions
+
+def get_partition_fs_type(partition):
+    try:
+        blkid_out = run_command(["blkid", "-o", "value", "-s", "TYPE", partition], check=False)
+        fs_type = blkid_out.stdout.strip()
+        return fs_type if fs_type else None
+    except:
+        return None
+
+def get_device_uuid(partition):
+    try:
+        uuid = run_command(["blkid", "-o", "value", "-s", "UUID", partition], check=True).stdout.strip()
+        return uuid
+    except:
+        return None
 
 def is_mounted(partition):
     try:
@@ -274,48 +237,96 @@ def is_mounted(partition):
     except subprocess.CalledProcessError:
         return False
 
-def get_device_uuid(partition):
-    # Attempt to get a stable UUID to identify the device
-    try:
-        uuid = run_command(["blkid", "-s", "UUID", "-o", "value", partition], check=True).stdout.strip()
-        return uuid
-    except:
-        # If UUID not found, fallback to using partition as unique ID
-        return partition
-
-def mount_drive(partition, mount_point):
-    if is_mounted(partition):
-        logging.info(f"{partition} is already mounted.")
+def mount_partition(partition, config):
+    uuid = get_device_uuid(partition)
+    if not uuid:
+        logging.error(f"Could not determine UUID for {partition}. Skipping mount.")
         return
+
+    if uuid in config:
+        mount_point = config[uuid]
+    else:
+        mount_point = f"{MOUNT_BASE}/drive_{uuid}"
+        config[uuid] = mount_point
+        save_config(config)
+
     os.makedirs(mount_point, exist_ok=True)
+
+    if not is_mounted(partition):
+        # Ensure /etc/fstab has entry for this uuid
+        fstab_file = "/etc/fstab"
+        with open(fstab_file, 'r') as f:
+            fstab_contents = f.read()
+        if f"UUID={uuid}" not in fstab_contents:
+            # Add a persistent fstab entry
+            with open(fstab_file, 'a') as f:
+                f.write(f"UUID={uuid} {mount_point} {FS_TYPE} defaults,noatime 0 2\n")
+
+        try:
+            run_command(["mount", mount_point], check=True)
+            logging.info(f"Mounted {partition} ({uuid}) at {mount_point}")
+        except Exception as e:
+            logging.error(f"Failed to mount {partition}: {e}")
+
+def create_partition_and_format(drive):
+    # Create a single GPT partition and format as ext4
     try:
-        run_command(["mount", partition, mount_point], check=True)
-        logging.info(f"Mounted {partition} at {mount_point}")
+        run_command(["parted", "-s", drive, "mklabel", "gpt"])
+        run_command(["parted", "-s", drive, "mkpart", "primary", FS_TYPE, "0%", "100%"])
+        # After creation, wait for partition to appear
+        time.sleep(2)
+        partitions = get_partitions(drive)
+        if partitions:
+            partition = partitions[0]
+            format_partition(partition)
+            return partition
+        else:
+            logging.error(f"No partition found after creating partition on {drive}")
+            return None
     except Exception as e:
-        logging.error(f"Failed to mount {partition}: {e}")
+        logging.error(f"Failed to create partition on {drive}: {e}")
+        return None
+
+def format_partition(partition):
+    try:
+        run_command(["mkfs.ext4", "-F", partition], check=True)
+        logging.info(f"Formatted {partition} as ext4.")
+    except Exception as e:
+        logging.error(f"Failed to format {partition}: {e}")
 
 def manage_drives():
     config = load_config()
+    all_drives = list_block_devices()
 
-    # Detect drives
-    usb_drives = detect_usb_drives()
-    other_drives = detect_other_drives()
+    for drive in all_drives:
+        if is_boot_drive(drive):
+            continue
 
-    for drive in usb_drives + other_drives:
+        # Check drive size
+        size = get_device_size(drive)
+        if size < SIZE_THRESHOLD:
+            # Not large enough for video storage, skip
+            continue
+
+        # For large drives:
         partitions = get_partitions(drive)
-        for partition in partitions:
-            dev_uuid = get_device_uuid(partition)
-            if dev_uuid in config:
-                # Use previously known mount point
-                mount_point = config[dev_uuid]
-            else:
-                # Generate a friendly name
-                friendly_name = f"drive_{partition.split('/')[-1]}"
-                mount_point = f"/mnt/{friendly_name}"
-                config[dev_uuid] = mount_point
-
-            if not is_mounted(partition):
-                mount_drive(partition, mount_point)
+        if not partitions:
+            # No partitions, create one
+            logging.info(f"{drive} has no partitions. Creating partition...")
+            partition = create_partition_and_format(drive)
+            if partition:
+                mount_partition(partition, config)
+        else:
+            # Check the first partition (Assumption: single partition)
+            # If multiple partitions are there, we might consider handling them all,
+            # but for simplicity, handle the first large partition.
+            for partition in partitions:
+                fs_type = get_partition_fs_type(partition)
+                if fs_type != FS_TYPE:
+                    # Reformat partition to ext4
+                    logging.info(f"Reformatting {partition} from {fs_type} to {FS_TYPE}...")
+                    format_partition(partition)
+                mount_partition(partition, config)
 
     save_config(config)
 
@@ -325,13 +336,19 @@ def manage_drives():
 
 def ensure_service_running(service_name):
     try:
+        # Enable service if not enabled
+        run_command(["systemctl", "enable", service_name], check=False)
+        # Start service if not running
         status = run_command(["systemctl", "is-active", service_name], check=False).stdout.strip()
         if status != "active":
-            logging.info(f"{service_name} is not running. Starting...")
-            run_command(["systemctl", "start", service_name], check=True)
-            logging.info(f"{service_name} started successfully.")
-        else:
+            logging.info(f"{service_name} not running. Starting...")
+            run_command(["systemctl", "start", service_name], check=False)
+        # Double check
+        status = run_command(["systemctl", "is-active", service_name], check=False).stdout.strip()
+        if status == "active":
             logging.info(f"{service_name} is running.")
+        else:
+            logging.error(f"Failed to start {service_name}.")
     except Exception as e:
         logging.error(f"Failed to ensure {service_name} is running: {e}")
 
@@ -346,15 +363,17 @@ def main():
     # Initial setup tasks
     configure_journald_volatile()
     setup_tmpfs_mounts()
-    check_and_mount_fstab_drives()
+
+    # Ensure media server is enabled and running
+    ensure_service_running(SERVICE_NAME)
 
     while True:
         current_time = time.time()
 
-        # Manage USB and other drives
+        # Manage large drives
         manage_drives()
 
-        # Ensure networkoptix-mediaserver is running
+        # Ensure Nx Witness service still running
         ensure_service_running(SERVICE_NAME)
 
         # Check for script updates every 24 hours
@@ -362,9 +381,7 @@ def main():
             update_script()
             last_script_update = current_time
 
-        # Sleep until next scan
         time.sleep(USB_SCAN_INTERVAL)
-
 
 if __name__ == "__main__":
     main()
