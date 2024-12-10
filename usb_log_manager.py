@@ -17,7 +17,7 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-CONFIG_FILE_PATH = "/opt/usblogmon/config.json"   
+CONFIG_FILE_PATH = "/opt/usblogmon/config.json"
 GITHUB_SCRIPT_URL = "https://raw.githubusercontent.com/lazerusrm/usblogmon/main/usb_log_manager.py"
 USB_SCAN_INTERVAL = 180           # Interval for rescanning USB drives (seconds)
 LOG_UPDATE_INTERVAL = 86400       # 24 hours
@@ -231,14 +231,29 @@ def get_device_uuid(partition):
         return None
 
 def is_mounted(partition):
-    # Just call run_command without redirecting stdout/stderr since we capture anyway
     try:
         run_command(["findmnt", partition], check=True)
         return True
     except subprocess.CalledProcessError:
         return False
 
-def mount_partition(partition, config):
+def approximate_size(size_bytes):
+    # Approximate the size in either GB or TB.
+    gb = size_bytes / (10**9)
+    if gb >= 1000:
+        # Use TB
+        tb = int(gb / 1000)
+        return f"{tb}T"
+    else:
+        return f"{int(gb)}G"
+
+def generate_mount_name(size_bytes, uuid):
+    size_str = approximate_size(size_bytes)
+    last4 = uuid[-4:] if len(uuid) >= 4 else uuid
+    # Format: d<size_str>-<last4>
+    return f"d{size_str}-{last4}"
+
+def mount_partition(partition, config, size_bytes):
     uuid = get_device_uuid(partition)
     if not uuid:
         logging.error(f"Could not determine UUID for {partition}. Skipping mount.")
@@ -247,7 +262,8 @@ def mount_partition(partition, config):
     if uuid in config:
         mount_point = config[uuid]
     else:
-        mount_point = f"{MOUNT_BASE}/drive_{uuid}"
+        mount_point_name = generate_mount_name(size_bytes, uuid)
+        mount_point = f"{MOUNT_BASE}/{mount_point_name}"
         config[uuid] = mount_point
         save_config(config)
 
@@ -302,7 +318,6 @@ def manage_drives():
         if is_boot_drive(drive):
             continue
 
-        # Check drive size
         size = get_device_size(drive)
         if size < SIZE_THRESHOLD:
             # Not large enough for video storage, skip
@@ -314,16 +329,16 @@ def manage_drives():
             logging.info(f"{drive} has no partitions. Creating partition...")
             partition = create_partition_and_format(drive)
             if partition:
-                mount_partition(partition, config)
+                mount_partition(partition, config, size)
         else:
-            # For simplicity, handle all partitions on the drive.
+            # Handle all partitions
             for partition in partitions:
                 fs_type = get_partition_fs_type(partition)
                 if fs_type != FS_TYPE:
                     # Reformat partition to ext4
                     logging.info(f"Reformatting {partition} from {fs_type or 'unknown'} to {FS_TYPE}...")
                     format_partition(partition)
-                mount_partition(partition, config)
+                mount_partition(partition, config, size)
 
     save_config(config)
 
