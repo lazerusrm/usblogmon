@@ -231,8 +231,9 @@ def get_device_uuid(partition):
         return None
 
 def is_mounted(partition):
+    # Just call run_command without redirecting stdout/stderr since we capture anyway
     try:
-        run_command(["findmnt", partition], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run_command(["findmnt", partition], check=True)
         return True
     except subprocess.CalledProcessError:
         return False
@@ -269,7 +270,6 @@ def mount_partition(partition, config):
             logging.error(f"Failed to mount {partition}: {e}")
 
 def create_partition_and_format(drive):
-    # Create a single GPT partition and format as ext4
     try:
         run_command(["parted", "-s", drive, "mklabel", "gpt"])
         run_command(["parted", "-s", drive, "mkpart", "primary", FS_TYPE, "0%", "100%"])
@@ -308,7 +308,6 @@ def manage_drives():
             # Not large enough for video storage, skip
             continue
 
-        # For large drives:
         partitions = get_partitions(drive)
         if not partitions:
             # No partitions, create one
@@ -317,14 +316,12 @@ def manage_drives():
             if partition:
                 mount_partition(partition, config)
         else:
-            # Check the first partition (Assumption: single partition)
-            # If multiple partitions are there, we might consider handling them all,
-            # but for simplicity, handle the first large partition.
+            # For simplicity, handle all partitions on the drive.
             for partition in partitions:
                 fs_type = get_partition_fs_type(partition)
                 if fs_type != FS_TYPE:
                     # Reformat partition to ext4
-                    logging.info(f"Reformatting {partition} from {fs_type} to {FS_TYPE}...")
+                    logging.info(f"Reformatting {partition} from {fs_type or 'unknown'} to {FS_TYPE}...")
                     format_partition(partition)
                 mount_partition(partition, config)
 

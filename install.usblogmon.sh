@@ -16,30 +16,23 @@ SERVICE_FILE="/etc/systemd/system/usblogmon.service"
 echo "Updating package list..."
 apt-get update -y
 
-# Check for Python3 and install if not exists
-if ! command -v python3 &> /dev/null; then
-    echo "Python3 is not installed. Installing Python3..."
-    apt-get install python3 -y
-fi
+# Ensure necessary system packages are installed
+DEPS=("python3" "python3-pip" "parted" "e2fsprogs" "curl")
+for pkg in "${DEPS[@]}"; do
+    if ! dpkg -l | grep -q "^ii\s\+$pkg\s"; then
+        echo "Installing $pkg..."
+        apt-get install -y $pkg
+    fi
+done
 
-# Check for pip3 and install if not exists
-if ! command -v pip3 &> /dev/null; then
-    echo "pip3 is not installed. Installing pip3..."
-    apt-get install python3-pip -y
-fi
-
-# Install required Python packages if not exists
-# pyudev
-if ! python3 -c "import pyudev" &> /dev/null; then
-    echo "Installing pyudev..."
-    pip3 install pyudev
-fi
-
-# requests
-if ! python3 -c "import requests" &> /dev/null; then
-    echo "Installing requests..."
-    pip3 install requests
-fi
+# Install required Python packages if not present
+REQ_PY_MODULES=("pyudev" "requests")
+for mod in "${REQ_PY_MODULES[@]}"; do
+    if ! python3 -c "import $mod" &> /dev/null; then
+        echo "Installing Python module: $mod"
+        pip3 install "$mod"
+    fi
+done
 
 # Create installation directory
 echo "Creating installation directory at $INSTALL_DIR"
@@ -81,4 +74,4 @@ systemctl enable usblogmon
 systemctl start usblogmon
 
 echo "Installation completed. The 'usblogmon' service is now running."
-echo "The usb_log_manager.py script will handle drive management, journald config, and service checks automatically."
+echo "The usb_log_manager.py script will now handle drive management, journald configuration, service checks, and self-updates automatically."
