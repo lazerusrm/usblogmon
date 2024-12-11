@@ -21,6 +21,7 @@ CONFIG_FILE_PATH = "/opt/usblogmon/config.json"
 GITHUB_SCRIPT_URL = "https://raw.githubusercontent.com/lazerusrm/usblogmon/main/usb_log_manager.py"
 USB_SCAN_INTERVAL = 180           # Interval for rescanning USB drives (seconds)
 LOG_UPDATE_INTERVAL = 86400       # 24 hours
+SCRIPT_UPDATE_INTERVAL = 604800   # 7 days (one week)
 MOUNTS = {
     "/var/log": (15, None),
     "/opt/networkoptix/mediaserver/var/log": (5, None),
@@ -253,9 +254,6 @@ def generate_mount_name(size_bytes, uuid):
 
 def run_fsck(partition):
     # Run e2fsck to try and fix the filesystem
-    # -f: Force checking
-    # -y: Assume yes to all fixes
-    # -p could be used for automatic repair but -y is more thorough for all yes answers
     try:
         run_command(["e2fsck", "-fy", partition], check=True)
         logging.info(f"Filesystem check and repair completed for {partition}.")
@@ -274,26 +272,21 @@ def attempt_mount(partition, mount_point):
         return False
 
 def attempt_repair_and_remount(partition, mount_point):
-    # If filesystem is ext4, try fsck
     fs_type = get_partition_fs_type(partition)
     if fs_type == FS_TYPE:
         logging.info(f"Attempting to repair filesystem on {partition}...")
         if run_fsck(partition):
-            # Attempt mount again
             if attempt_mount(partition, mount_point):
                 return True
             else:
-                # If still fails after repair, reformat
                 logging.info(f"Mount still failing after repair, reformatting {partition}...")
                 format_partition(partition)
                 return attempt_mount(partition, mount_point)
         else:
-            # fsck failed, reformat
             logging.info(f"Filesystem repair failed for {partition}, reformatting...")
             format_partition(partition)
             return attempt_mount(partition, mount_point)
     else:
-        # Not ext4, just reformat directly
         logging.info(f"Partition {partition} not {FS_TYPE}, reformatting...")
         format_partition(partition)
         return attempt_mount(partition, mount_point)
@@ -324,9 +317,8 @@ def mount_partition(partition, config, size_bytes):
             with open(fstab_file, 'a') as f:
                 f.write(f"UUID={uuid} {mount_point} {FS_TYPE} defaults,noatime 0 2\n")
 
-        # Attempt to mount
         if not attempt_mount(partition, mount_point):
-            # If initial mount fails, attempt repair strategies
+            # Attempt repair if mount fails
             attempt_repair_and_remount(partition, mount_point)
 
 def create_partition_and_format(drive):
@@ -378,7 +370,6 @@ def manage_drives():
             for partition in partitions:
                 fs_type = get_partition_fs_type(partition)
                 if fs_type != FS_TYPE:
-                    # Reformat partition to ext4
                     logging.info(f"Reformatting {partition} from {fs_type or 'unknown'} to {FS_TYPE}...")
                     format_partition(partition)
                 mount_partition(partition, config, size)
@@ -413,7 +404,8 @@ def ensure_service_running(service_name):
 
 def main():
     last_log_update = time.time() - LOG_UPDATE_INTERVAL
-    last_script_update = time.time()
+    # Use a separate variable for script updates, initialized so that it checks right away if needed
+    last_script_update = time.time() - SCRIPT_UPDATE_INTERVAL
 
     # Initial setup tasks
     configure_journald_volatile()
@@ -431,8 +423,8 @@ def main():
         # Ensure Nx Witness service still running
         ensure_service_running(SERVICE_NAME)
 
-        # Check for script updates every 24 hours
-        if current_time - last_script_update >= LOG_UPDATE_INTERVAL:
+        # Check for script updates once per week
+        if current_time - last_script_update >= SCRIPT_UPDATE_INTERVAL:
             update_script()
             last_script_update = current_time
 
