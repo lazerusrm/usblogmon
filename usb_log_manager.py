@@ -10,6 +10,7 @@ import re
 import json
 import pyudev
 import logging
+import fnmatch
 
 # ============================================================
 # Configuration
@@ -19,20 +20,21 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 CONFIG_FILE_PATH = "/opt/usblogmon/config.json"
 GITHUB_SCRIPT_URL = "https://raw.githubusercontent.com/lazerusrm/usblogmon/main/usb_log_manager.py"
+
 USB_SCAN_INTERVAL = 180           # Interval for rescanning USB drives (seconds)
-LOG_UPDATE_INTERVAL = 86400       # 24 hours
-SCRIPT_UPDATE_INTERVAL = 604800   # 7 days (one week)
+LOG_UPDATE_INTERVAL = 86400       # 24 hours for both logs and script update
+SCRIPT_UPDATE_INTERVAL = 86400    # Once a day updates
 MOUNTS = {
-    "/var/log": (15, None),
-    "/opt/networkoptix/mediaserver/var/log": (5, None),
+    "/var/log": (500, None),
     "/tmp": (30, "1777"),
 }
 JOURNALD_CONF = "/etc/systemd/journald.conf"
-MAX_TMPFS_TOTAL = 50  # MB total allowed for tmpfs
+MAX_TMPFS_TOTAL = 530  # MB total allowed for tmpfs (500 + 30)
 SERVICE_NAME = "networkoptix-mediaserver"
 SIZE_THRESHOLD = 512 * 10**9  # 512 GB in bytes
 FS_TYPE = "ext4"
 MOUNT_BASE = "/mnt"
+NX_LOG_DIR = "/opt/networkoptix/mediaserver/var/log"
 
 # ============================================================
 # Utility Functions
@@ -101,6 +103,7 @@ def configure_journald_volatile():
                     new_lines.append("Seal=no\n")
                 else:
                     new_lines.append(line)
+
             # Ensure settings exist
             if not any(l.strip().startswith("Storage=") for l in new_lines):
                 new_lines.append("Storage=volatile\n")
@@ -145,11 +148,11 @@ def configure_tmpfs(directory, size_mb, mode=None):
     if mode:
         os.chmod(directory, int(mode, 8))
 
-    fstab_line = f"tmpfs   {directory}    tmpfs   defaults,noatime"
+    fstab_line = f"tmpfs   {directory}    tmpfs   defaults,noatime,size={size_mb}M"
     if directory == "/tmp":
-        fstab_line += f",mode={mode},size={size_mb}M    0 0"
-    else:
-        fstab_line += f",size={size_mb}M    0 0"
+        fstab_line += f",mode={mode}"
+
+    fstab_line += "    0 0"
 
     fstab_file = "/etc/fstab"
     with open(fstab_file, 'r') as f:
@@ -175,6 +178,24 @@ def setup_tmpfs_mounts():
     check_total_tmpfs()
     for directory, (size_mb, mode) in MOUNTS.items():
         configure_tmpfs(directory, size_mb, mode)
+
+# ============================================================
+# Nx Witness Log Management
+# ============================================================
+
+def clean_nx_logs():
+    # Delete any zip files in /opt/networkoptix/mediaserver/var/log
+    # but leave main.log and system.log alone.
+    if os.path.isdir(NX_LOG_DIR):
+        for root, dirs, files in os.walk(NX_LOG_DIR):
+            for f in files:
+                if fnmatch.fnmatch(f, '*.zip'):
+                    zip_path = os.path.join(root, f)
+                    try:
+                        os.remove(zip_path)
+                        logging.info(f"Deleted {zip_path} to reduce log storage.")
+                    except Exception as e:
+                        logging.error(f"Failed to delete {zip_path}: {e}")
 
 # ============================================================
 # Drive Management
@@ -253,7 +274,6 @@ def generate_mount_name(size_bytes, uuid):
     return f"d{size_str}-{last4}"
 
 def run_fsck(partition):
-    # Run e2fsck to try and fix the filesystem
     try:
         run_command(["e2fsck", "-fy", partition], check=True)
         logging.info(f"Filesystem check and repair completed for {partition}.")
@@ -404,14 +424,11 @@ def ensure_service_running(service_name):
 
 def main():
     last_log_update = time.time() - LOG_UPDATE_INTERVAL
-    # Use a separate variable for script updates, initialized so that it checks right away if needed
     last_script_update = time.time() - SCRIPT_UPDATE_INTERVAL
 
     # Initial setup tasks
     configure_journald_volatile()
     setup_tmpfs_mounts()
-
-    # Ensure media server is enabled and running
     ensure_service_running(SERVICE_NAME)
 
     while True:
@@ -423,7 +440,10 @@ def main():
         # Ensure Nx Witness service still running
         ensure_service_running(SERVICE_NAME)
 
-        # Check for script updates once per week
+        # Clean Nx zip logs
+        clean_nx_logs()
+
+        # Check for script updates daily
         if current_time - last_script_update >= SCRIPT_UPDATE_INTERVAL:
             update_script()
             last_script_update = current_time
