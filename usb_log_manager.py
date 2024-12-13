@@ -11,6 +11,7 @@ import json
 import pyudev
 import logging
 import fnmatch
+from datetime import datetime
 
 # ============================================================
 # Configuration
@@ -212,13 +213,19 @@ def clean_nx_logs():
                         logging.error(f"Failed to delete {zip_path}: {e}")
 
 # ============================================================
-# Deprecated NX Tmpfs Migration
+# Deprecated NX Tmpfs Migration (One-Time Fix)
 # ============================================================
 
 def migrate_deprecated_nx_tmpfs():
     config = load_config()
     if config.get("deprecated_tmpfs_fixed"):
         # Already fixed, do nothing
+        return
+
+    # Check current time
+    now = datetime.now()
+    if now.hour != 2:  # Only run between 2:00AM and 3:00AM
+        # Not in the allowed time window, skip for now
         return
 
     target_dir = "/opt/networkoptix/mediaserver/var/log"
@@ -242,12 +249,23 @@ def migrate_deprecated_nx_tmpfs():
             continue
         new_lines.append(line)
 
+    # Stop Nx Witness service before unmounting
+    run_command(["systemctl", "stop", SERVICE_NAME], check=False)
+
     if is_mounted_tmpfs:
         try:
             run_command(["umount", target_dir], check=True)
             logging.info(f"Unmounted tmpfs from {target_dir}.")
         except Exception as e:
             logging.error(f"Failed to unmount {target_dir}: {e}")
+            # If we fail to unmount, let's try lazy unmount as a last resort
+            try:
+                run_command(["umount", "-l", target_dir], check=True)
+                logging.info(f"Lazy unmounted tmpfs from {target_dir}.")
+            except Exception as ee:
+                logging.error(f"Lazy unmount also failed for {target_dir}: {ee}")
+                # If we still fail, we will retry tomorrow at 2am
+                return
 
     if fstab_modified:
         with open(fstab_file, 'w') as f:
@@ -257,12 +275,13 @@ def migrate_deprecated_nx_tmpfs():
     if not os.path.exists(target_dir):
         os.makedirs(target_dir, exist_ok=True)
 
-    # Adjust ownership/permissions if needed
+    # Adjust ownership/permissions as needed
     run_command(["chown", "networkoptix:networkoptix", target_dir], check=False)
     run_command(["chmod", "755", target_dir], check=False)
 
+    # Restart Nx Witness service after fix
     try:
-        run_command(["systemctl", "restart", SERVICE_NAME], check=False)
+        run_command(["systemctl", "start", SERVICE_NAME], check=False)
         logging.info(f"Restarted {SERVICE_NAME} after nx tmpfs migration.")
     except Exception as e:
         logging.error(f"Failed to restart {SERVICE_NAME} after nx tmpfs migration: {e}")
@@ -497,7 +516,7 @@ def main():
     else:
         logging.info(f"Environment type: {env_type}. Proceeding with disk management.")
 
-    # One-time migration for deprecated nx tmpfs setup
+    # One-time migration for deprecated nx tmpfs setup (only at 2:00AM - 3:00AM)
     migrate_deprecated_nx_tmpfs()
 
     # Initial setup tasks
