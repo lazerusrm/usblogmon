@@ -21,18 +21,17 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 CONFIG_FILE_PATH = "/opt/usblogmon/config.json"
 GITHUB_SCRIPT_URL = "https://raw.githubusercontent.com/lazerusrm/usblogmon/main/usb_log_manager.py"
 
-# We reduce the loop interval to 10 seconds to ensure Nx service downtime < 20s
 USB_SCAN_INTERVAL = 10
-LOG_UPDATE_INTERVAL = 86400       # 24 hours for logs
-SCRIPT_UPDATE_INTERVAL = 86400    # Once a day updates
+LOG_UPDATE_INTERVAL = 86400       # 24 hours
+SCRIPT_UPDATE_INTERVAL = 86400    # once a day
 MOUNTS = {
     "/var/log": (500, None),
     "/tmp": (30, "1777"),
 }
 JOURNALD_CONF = "/etc/systemd/journald.conf"
-MAX_TMPFS_TOTAL = 530  # MB total allowed for tmpfs (500 + 30)
+MAX_TMPFS_TOTAL = 530  # MB total allowed for tmpfs
 SERVICE_NAME = "networkoptix-mediaserver"
-SIZE_THRESHOLD = 512 * 10**9  # 512 GB in bytes
+SIZE_THRESHOLD = 512 * 10**9  # 512 GB
 FS_TYPE = "ext4"
 MOUNT_BASE = "/mnt"
 NX_LOG_DIR = "/opt/networkoptix/mediaserver/var/log"
@@ -67,31 +66,16 @@ def get_script_hash():
 # ============================================================
 
 def detect_environment():
-    """
-    Detect if we are running inside a container or VM.
-    Using systemd-detect-virt which returns:
-    - "none" for no virtualization
-    - "lxc", "docker", "openvz" for containers
-    - "qemu", "kvm" for VMs
-    and other values for other hypervisors.
-    
-    If in container or VM, we skip disk management.
-    """
     try:
         result = run_command(["systemd-detect-virt", "--quiet"], check=False)
         env_type = result.stdout.strip()
         return env_type if env_type else "none"
     except:
-        # If command not found or fails, assume "none"
         return "none"
 
 def should_skip_disk_management(env_type):
-    # Containers
     container_types = {"lxc", "docker", "openvz"}
-    # VMs
     vm_types = {"qemu", "kvm"}
-
-    # If environment is container or VM, skip disk management.
     if env_type in container_types or env_type in vm_types:
         return True
     return False
@@ -139,7 +123,6 @@ def configure_journald_volatile():
                 else:
                     new_lines.append(line)
 
-            # Ensure settings exist
             if not any(l.strip().startswith("Storage=") for l in new_lines):
                 new_lines.append("Storage=volatile\n")
             if not any(l.strip().startswith("Compress=") for l in new_lines):
@@ -170,7 +153,6 @@ def is_tmpfs_mounted(directory):
         return False
 
 def configure_tmpfs(directory, size_mb, mode=None):
-    # Clean directory
     if os.path.exists(directory):
         for root, dirs, files in os.walk(directory, topdown=False):
             for name in files:
@@ -218,7 +200,6 @@ def setup_tmpfs_mounts():
 # ============================================================
 
 def clean_nx_logs():
-    # Delete any zip files in NX_LOG_DIR but leave main.log and system.log
     if os.path.isdir(NX_LOG_DIR):
         for root, dirs, files in os.walk(NX_LOG_DIR):
             for f in files:
@@ -231,7 +212,66 @@ def clean_nx_logs():
                         logging.error(f"Failed to delete {zip_path}: {e}")
 
 # ============================================================
-# Drive Management (Skippable if in Container/VM)
+# Deprecated NX Tmpfs Migration
+# ============================================================
+
+def migrate_deprecated_nx_tmpfs():
+    config = load_config()
+    if config.get("deprecated_tmpfs_fixed"):
+        # Already fixed, do nothing
+        return
+
+    target_dir = "/opt/networkoptix/mediaserver/var/log"
+    is_mounted_tmpfs = False
+    try:
+        mount_out = run_command(["mount"], check=False).stdout
+        if "tmpfs on " + target_dir in mount_out:
+            is_mounted_tmpfs = True
+    except:
+        pass
+
+    fstab_file = "/etc/fstab"
+    with open(fstab_file, 'r') as f:
+        fstab_lines = f.readlines()
+
+    new_lines = []
+    fstab_modified = False
+    for line in fstab_lines:
+        if target_dir in line and "tmpfs" in line:
+            fstab_modified = True
+            continue
+        new_lines.append(line)
+
+    if is_mounted_tmpfs:
+        try:
+            run_command(["umount", target_dir], check=True)
+            logging.info(f"Unmounted tmpfs from {target_dir}.")
+        except Exception as e:
+            logging.error(f"Failed to unmount {target_dir}: {e}")
+
+    if fstab_modified:
+        with open(fstab_file, 'w') as f:
+            f.writelines(new_lines)
+        logging.info("Removed deprecated tmpfs entry for NX logs from /etc/fstab.")
+
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir, exist_ok=True)
+
+    # Adjust ownership/permissions if needed
+    run_command(["chown", "networkoptix:networkoptix", target_dir], check=False)
+    run_command(["chmod", "755", target_dir], check=False)
+
+    try:
+        run_command(["systemctl", "restart", SERVICE_NAME], check=False)
+        logging.info(f"Restarted {SERVICE_NAME} after nx tmpfs migration.")
+    except Exception as e:
+        logging.error(f"Failed to restart {SERVICE_NAME} after nx tmpfs migration: {e}")
+
+    config["deprecated_tmpfs_fixed"] = True
+    save_config(config)
+
+# ============================================================
+# Drive Management
 # ============================================================
 
 def is_boot_drive(drive):
@@ -295,7 +335,6 @@ def is_mounted(partition):
 def approximate_size(size_bytes):
     gb = size_bytes / (10**9)
     if gb >= 1000:
-        # Use TB
         tb = int(gb / 1000)
         return f"{tb}T"
     else:
@@ -405,7 +444,6 @@ def manage_drives():
 
         size = get_device_size(drive)
         if size < SIZE_THRESHOLD:
-            # Not large enough for video storage, skip
             continue
 
         partitions = get_partitions(drive)
@@ -415,7 +453,6 @@ def manage_drives():
             if partition:
                 mount_partition(partition, config, size)
         else:
-            # Handle all partitions
             for partition in partitions:
                 fs_type = get_partition_fs_type(partition)
                 if fs_type != FS_TYPE:
@@ -431,9 +468,7 @@ def manage_drives():
 
 def ensure_service_running(service_name):
     try:
-        # Ensure service is enabled
         run_command(["systemctl", "enable", service_name], check=False)
-        # Check if running
         status = run_command(["systemctl", "is-active", service_name], check=False).stdout.strip()
         if status != "active":
             logging.info(f"{service_name} not running. Starting...")
@@ -455,13 +490,15 @@ def main():
     last_log_update = time.time() - LOG_UPDATE_INTERVAL
     last_script_update = time.time() - SCRIPT_UPDATE_INTERVAL
 
-    # Detect environment
     env_type = detect_environment()
     skip_disks = should_skip_disk_management(env_type)
     if skip_disks:
         logging.info(f"Detected environment type: {env_type}. Skipping disk management.")
     else:
         logging.info(f"Environment type: {env_type}. Proceeding with disk management.")
+
+    # One-time migration for deprecated nx tmpfs setup
+    migrate_deprecated_nx_tmpfs()
 
     # Initial setup tasks
     configure_journald_volatile()
@@ -471,17 +508,12 @@ def main():
     while True:
         current_time = time.time()
 
-        # Only manage drives if not in a container or VM environment
         if not skip_disks:
             manage_drives()
 
-        # Ensure Nx Witness service is running
         ensure_service_running(SERVICE_NAME)
-
-        # Clean Nx zip logs
         clean_nx_logs()
 
-        # Check for script updates daily
         if current_time - last_script_update >= SCRIPT_UPDATE_INTERVAL:
             update_script()
             last_script_update = current_time
