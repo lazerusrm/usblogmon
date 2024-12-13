@@ -21,8 +21,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 CONFIG_FILE_PATH = "/opt/usblogmon/config.json"
 GITHUB_SCRIPT_URL = "https://raw.githubusercontent.com/lazerusrm/usblogmon/main/usb_log_manager.py"
 
-USB_SCAN_INTERVAL = 180           # Interval for rescanning USB drives (seconds)
-LOG_UPDATE_INTERVAL = 86400       # 24 hours for both logs and script update
+# We reduce the loop interval to 10 seconds to ensure Nx service downtime < 20s
+USB_SCAN_INTERVAL = 10
+LOG_UPDATE_INTERVAL = 86400       # 24 hours for logs
 SCRIPT_UPDATE_INTERVAL = 86400    # Once a day updates
 MOUNTS = {
     "/var/log": (500, None),
@@ -60,6 +61,40 @@ def get_script_hash():
     with open(__file__, 'rb') as file:
         data = file.read()
     return hashlib.sha256(data).hexdigest()
+
+# ============================================================
+# Environment Detection
+# ============================================================
+
+def detect_environment():
+    """
+    Detect if we are running inside a container or VM.
+    Using systemd-detect-virt which returns:
+    - "none" for no virtualization
+    - "lxc", "docker", "openvz" for containers
+    - "qemu", "kvm" for VMs
+    and other values for other hypervisors.
+    
+    If in container or VM, we skip disk management.
+    """
+    try:
+        result = run_command(["systemd-detect-virt", "--quiet"], check=False)
+        env_type = result.stdout.strip()
+        return env_type if env_type else "none"
+    except:
+        # If command not found or fails, assume "none"
+        return "none"
+
+def should_skip_disk_management(env_type):
+    # Containers
+    container_types = {"lxc", "docker", "openvz"}
+    # VMs
+    vm_types = {"qemu", "kvm"}
+
+    # If environment is container or VM, skip disk management.
+    if env_type in container_types or env_type in vm_types:
+        return True
+    return False
 
 # ============================================================
 # Self-update Mechanism
@@ -149,9 +184,8 @@ def configure_tmpfs(directory, size_mb, mode=None):
         os.chmod(directory, int(mode, 8))
 
     fstab_line = f"tmpfs   {directory}    tmpfs   defaults,noatime,size={size_mb}M"
-    if directory == "/tmp":
+    if directory == "/tmp" and mode:
         fstab_line += f",mode={mode}"
-
     fstab_line += "    0 0"
 
     fstab_file = "/etc/fstab"
@@ -184,8 +218,7 @@ def setup_tmpfs_mounts():
 # ============================================================
 
 def clean_nx_logs():
-    # Delete any zip files in /opt/networkoptix/mediaserver/var/log
-    # but leave main.log and system.log alone.
+    # Delete any zip files in NX_LOG_DIR but leave main.log and system.log
     if os.path.isdir(NX_LOG_DIR):
         for root, dirs, files in os.walk(NX_LOG_DIR):
             for f in files:
@@ -198,7 +231,7 @@ def clean_nx_logs():
                         logging.error(f"Failed to delete {zip_path}: {e}")
 
 # ============================================================
-# Drive Management
+# Drive Management (Skippable if in Container/VM)
 # ============================================================
 
 def is_boot_drive(drive):
@@ -328,17 +361,14 @@ def mount_partition(partition, config, size_bytes):
     os.makedirs(mount_point, exist_ok=True)
 
     if not is_mounted(partition):
-        # Ensure /etc/fstab has entry for this uuid
         fstab_file = "/etc/fstab"
         with open(fstab_file, 'r') as f:
             fstab_contents = f.read()
         if f"UUID={uuid}" not in fstab_contents:
-            # Add a persistent fstab entry
             with open(fstab_file, 'a') as f:
                 f.write(f"UUID={uuid} {mount_point} {FS_TYPE} defaults,noatime 0 2\n")
 
         if not attempt_mount(partition, mount_point):
-            # Attempt repair if mount fails
             attempt_repair_and_remount(partition, mount_point)
 
 def create_partition_and_format(drive):
@@ -380,7 +410,6 @@ def manage_drives():
 
         partitions = get_partitions(drive)
         if not partitions:
-            # No partitions, create one
             logging.info(f"{drive} has no partitions. Creating partition...")
             partition = create_partition_and_format(drive)
             if partition:
@@ -402,9 +431,9 @@ def manage_drives():
 
 def ensure_service_running(service_name):
     try:
-        # Enable service if not enabled
+        # Ensure service is enabled
         run_command(["systemctl", "enable", service_name], check=False)
-        # Start service if not running
+        # Check if running
         status = run_command(["systemctl", "is-active", service_name], check=False).stdout.strip()
         if status != "active":
             logging.info(f"{service_name} not running. Starting...")
@@ -414,7 +443,7 @@ def ensure_service_running(service_name):
         if status == "active":
             logging.info(f"{service_name} is running.")
         else:
-            logging.error(f"Failed to start {service_name}.")
+            logging.error(f"Failed to start {service_name}. Will retry in next iteration.")
     except Exception as e:
         logging.error(f"Failed to ensure {service_name} is running: {e}")
 
@@ -426,6 +455,14 @@ def main():
     last_log_update = time.time() - LOG_UPDATE_INTERVAL
     last_script_update = time.time() - SCRIPT_UPDATE_INTERVAL
 
+    # Detect environment
+    env_type = detect_environment()
+    skip_disks = should_skip_disk_management(env_type)
+    if skip_disks:
+        logging.info(f"Detected environment type: {env_type}. Skipping disk management.")
+    else:
+        logging.info(f"Environment type: {env_type}. Proceeding with disk management.")
+
     # Initial setup tasks
     configure_journald_volatile()
     setup_tmpfs_mounts()
@@ -434,10 +471,11 @@ def main():
     while True:
         current_time = time.time()
 
-        # Manage large drives
-        manage_drives()
+        # Only manage drives if not in a container or VM environment
+        if not skip_disks:
+            manage_drives()
 
-        # Ensure Nx Witness service still running
+        # Ensure Nx Witness service is running
         ensure_service_running(SERVICE_NAME)
 
         # Clean Nx zip logs
