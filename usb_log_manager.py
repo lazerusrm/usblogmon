@@ -6,41 +6,54 @@ import time
 import requests
 import hashlib
 import sys
-import re
 import json
 import pyudev
 import logging
 import fnmatch
+import shutil
 from datetime import datetime
 
-# ============================================================
+# ============================================================================
 # Configuration
-# ============================================================
-
+# ============================================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 CONFIG_FILE_PATH = "/opt/usblogmon/config.json"
 GITHUB_SCRIPT_URL = "https://raw.githubusercontent.com/lazerusrm/usblogmon/main/usb_log_manager.py"
 
-USB_SCAN_INTERVAL = 10
-LOG_UPDATE_INTERVAL = 86400       # 24 hours
+# Intervals
+USB_SCAN_INTERVAL = 10            # main loop sleep interval
 SCRIPT_UPDATE_INTERVAL = 86400    # once a day
-MOUNTS = {
-    "/var/log": (500, None),
-    "/tmp": (30, "1777"),
-}
-JOURNALD_CONF = "/etc/systemd/journald.conf"
-MAX_TMPFS_TOTAL = 530  # MB total allowed for tmpfs
+FLUSH_INTERVAL = 12 * 3600        # 12 hours, for "twice-a-day" flush
+LOG_UPDATE_INTERVAL = 86400       # (if you still want a 24hr-based Nx log cleanup timing)
+
+# OverlayFS & Overflow Settings
+TMP_RAM_SIZE = "100M"  # 100MB upper layer for /tmp
+LOG_RAM_SIZE = "500M"  # 500MB upper layer for /var/log (example)
+FILE_SIZE_LIMIT = 100 * 1024 * 1024  # 100MB threshold for immediate large file move
+
+# Where to look for external drives (lower layer)
+EXTERNAL_MOUNT_CHECK = ["/mnt", "/media"]
+MOUNT_BASE = "/mnt"
+
+# Nx Witness and journald
 SERVICE_NAME = "networkoptix-mediaserver"
+NX_LOG_DIR = "/opt/networkoptix/mediaserver/var/log"
+JOURNALD_CONF = "/etc/systemd/journald.conf"
+
+# One-time Nx tmpfs migration fix runs at 2:00AM
+MIGRATION_HOUR = 2
+
+# Large Drive Management
 SIZE_THRESHOLD = 512 * 10**9  # 512 GB
 FS_TYPE = "ext4"
-MOUNT_BASE = "/mnt"
-NX_LOG_DIR = "/opt/networkoptix/mediaserver/var/log"
 
-# ============================================================
+# Combined limit for pure tmpfs fallback if needed
+MAX_TMPFS_TOTAL = 530  # MB total for purely tmpfs if fallback
+
+# ============================================================================
 # Utility Functions
-# ============================================================
-
+# ============================================================================
 def run_command(cmd, check=True, capture_output=True):
     return subprocess.run(cmd, check=check, capture_output=capture_output, text=True)
 
@@ -62,10 +75,9 @@ def get_script_hash():
         data = file.read()
     return hashlib.sha256(data).hexdigest()
 
-# ============================================================
+# ============================================================================
 # Environment Detection
-# ============================================================
-
+# ============================================================================
 def detect_environment():
     try:
         result = run_command(["systemd-detect-virt", "--quiet"], check=False)
@@ -81,10 +93,9 @@ def should_skip_disk_management(env_type):
         return True
     return False
 
-# ============================================================
+# ============================================================================
 # Self-update Mechanism
-# ============================================================
-
+# ============================================================================
 def update_script():
     logging.info("Checking for script updates...")
     try:
@@ -94,7 +105,7 @@ def update_script():
         new_script_hash = hashlib.sha256(new_script_content).hexdigest()
 
         if new_script_hash != get_script_hash():
-            logging.info("New version of the script found. Updating...")
+            logging.info("New version found. Updating script...")
             with open(__file__, 'wb') as file:
                 file.write(new_script_content)
             logging.info("Script updated. Restarting...")
@@ -102,13 +113,16 @@ def update_script():
         else:
             logging.info("Already running the latest version.")
     except requests.RequestException as e:
-        logging.error(f"Error while checking for updates: {e}")
+        logging.error(f"Error checking for updates: {e}")
 
-# ============================================================
+# ============================================================================
 # Journald Configuration (Volatile)
-# ============================================================
-
+# ============================================================================
 def configure_journald_volatile():
+    """
+    Forces journald to store logs only in memory (volatile),
+    disabling compression and sealing for minimal disk usage.
+    """
     try:
         if os.path.exists(JOURNALD_CONF):
             with open(JOURNALD_CONF, 'r') as f:
@@ -142,65 +156,177 @@ def configure_journald_volatile():
     except Exception as e:
         logging.error(f"Failed to configure journald: {e}")
 
-# ============================================================
-# Tmpfs Mounts
-# ============================================================
+# ============================================================================
+# OverlayFS Setup & Management
+# ============================================================================
+def find_external_drive():
+    """
+    Search for an already-mounted external drive in EXTERNAL_MOUNT_CHECK.
+    Returns the first valid path or None if not found.
+    """
+    for base in EXTERNAL_MOUNT_CHECK:
+        if os.path.isdir(base):
+            for item in os.listdir(base):
+                path = os.path.join(base, item)
+                if os.path.ismount(path):
+                    return path
+    return None
 
-def is_tmpfs_mounted(directory):
+def setup_overlayfs(directory, ram_size, fallback_tmpfs_size_mb=None, mode="755"):
+    """
+    Sets up an OverlayFS that uses a tmpfs 'upper' layer + an external drive
+    'lower' layer. If no external drive is found, optionally fallback to direct
+    tmpfs (from the original script logic).
+    """
+    external_dir = find_external_drive()
+    # The 'ram_disk' is our upper layer
+    ram_disk = f"/mnt/ramdisk_{os.path.basename(directory)}"
+    # We'll store the overlay "work" dir here
+    work_dir = f"{ram_disk}_work"
+
+    # If external drive is found, we create an 'overflow_dir' on that drive
+    overflow_dir = None
+    if external_dir:
+        overflow_dir = os.path.join(external_dir, f"overlay_{os.path.basename(directory)}")
+        os.makedirs(overflow_dir, exist_ok=True)
+
     try:
-        out = run_command(["mount"], check=False).stdout
-        return f" on {directory} type tmpfs" in out
-    except:
-        return False
-
-def configure_tmpfs(directory, size_mb, mode=None):
-    if os.path.exists(directory):
-        for root, dirs, files in os.walk(directory, topdown=False):
-            for name in files:
-                os.remove(os.path.join(root, name))
-            for name in dirs:
-                os.rmdir(os.path.join(root, name))
-    else:
+        # 1. Ensure the final directory (the mountpoint) exists
         os.makedirs(directory, exist_ok=True)
+        os.makedirs(ram_disk, exist_ok=True)
+        os.makedirs(work_dir, exist_ok=True)
 
-    if mode:
-        os.chmod(directory, int(mode, 8))
+        # 2. Mount a tmpfs on ram_disk to hold the upper layer
+        run_command(["mount", "-t", "tmpfs", "-o", f"size={ram_size}", "tmpfs", ram_disk])
+        logging.info(f"Mounted tmpfs at {ram_disk} with size={ram_size} for {directory}")
 
-    fstab_line = f"tmpfs   {directory}    tmpfs   defaults,noatime,size={size_mb}M"
-    if directory == "/tmp" and mode:
-        fstab_line += f",mode={mode}"
-    fstab_line += "    0 0"
+        # 3. If we have an external drive, set up OverlayFS
+        if overflow_dir:
+            run_command([
+                "mount", "-t", "overlay",
+                "overlay",
+                "-o", f"lowerdir={overflow_dir},upperdir={ram_disk},workdir={work_dir}",
+                directory
+            ])
+            logging.info(f"Mounted OverlayFS for {directory}: upper={ram_disk}, lower={overflow_dir}")
+        else:
+            # If no external drive found, fallback to *pure tmpfs*.
+            run_command(["umount", ram_disk], check=False)
+            try:
+                os.rmdir(ram_disk)
+                os.rmdir(work_dir)
+            except:
+                pass
+            if fallback_tmpfs_size_mb:
+                fstab_line = f"tmpfs   {directory}    tmpfs   defaults,noatime,size={fallback_tmpfs_size_mb}M 0 0"
+                with open("/etc/fstab", 'r') as f:
+                    fstab_contents = f.read()
+                if f" {directory} " not in fstab_contents:
+                    with open("/etc/fstab", 'a') as f:
+                        f.write(fstab_line + "\n")
+                run_command(["mount", directory], check=False)
+                logging.info(f"No external drive found. Using direct tmpfs {fallback_tmpfs_size_mb} MB for {directory}.")
+            else:
+                logging.info(f"No external drive found. Using direct tmpfs approach for {directory}, no fallback size given.")
 
-    fstab_file = "/etc/fstab"
-    with open(fstab_file, 'r') as f:
-        fstab_contents = f.read()
+        # 4. Set permissions
+        if mode:
+            os.chmod(directory, int(mode, 8))
 
-    if f" {directory} " not in fstab_contents:
-        with open(fstab_file, 'a') as f:
-            f.write(fstab_line + "\n")
-        logging.info(f"Added {directory} to /etc/fstab.")
+    except Exception as e:
+        logging.error(f"Failed to set up OverlayFS for {directory}: {e}")
 
-    if not is_tmpfs_mounted(directory):
-        run_command(["mount", directory], check=True)
-        logging.info(f"Mounted {directory} as tmpfs with size={size_mb}M.")
+def manage_file_overflow(directory):
+    """
+    Periodically checks files in `directory` that exceed FILE_SIZE_LIMIT
+    and moves them to the external drive's lowerdir so they don't
+    consume RAM. This is for immediate "big file" overflow.
+    """
+    external_dir = find_external_drive()
+    if not external_dir:
+        return
 
-def check_total_tmpfs():
-    total = sum(size for _, (size, _) in MOUNTS.items())
-    if total > MAX_TMPFS_TOTAL:
-        raise ValueError(f"Total tmpfs allocation {total}MB exceeds {MAX_TMPFS_TOTAL}MB.")
-    else:
-        logging.info(f"Total tmpfs allocation {total}MB is within limit.")
+    overflow_dir = os.path.join(external_dir, f"overlay_{os.path.basename(directory)}")
+    if not os.path.exists(overflow_dir):
+        return
 
-def setup_tmpfs_mounts():
-    check_total_tmpfs()
-    for directory, (size_mb, mode) in MOUNTS.items():
-        configure_tmpfs(directory, size_mb, mode)
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            file_path = os.path.join(root, file)
+            try:
+                size = os.path.getsize(file_path)
+                if size > FILE_SIZE_LIMIT:
+                    relative_path = os.path.relpath(file_path, directory)
+                    dest_path = os.path.join(overflow_dir, relative_path)
+                    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                    shutil.move(file_path, dest_path)
+                    logging.info(f"Moved large file {file_path} ({size} bytes) to {dest_path}")
+            except Exception as e:
+                logging.error(f"Error moving {file_path}: {e}")
 
-# ============================================================
+def flush_overlay(directory):
+    """
+    Twice-a-day job: Moves *all* files from the upper RAM layer to the external
+    (lower) directory, effectively syncing everything to disk. This helps ensure
+    we’re not storing too many logs in RAM, even if they're below the size limit.
+    """
+    external_dir = find_external_drive()
+    if not external_dir:
+        logging.warning(f"No external drive found; cannot flush overlay for {directory}.")
+        return
+    overflow_dir = os.path.join(external_dir, f"overlay_{os.path.basename(directory)}")
+    if not os.path.exists(overflow_dir):
+        logging.warning(f"Overlay lower dir {overflow_dir} does not exist; cannot flush.")
+        return
+
+    # Check free space first
+    if not check_free_space(overflow_dir):
+        logging.warning(f"External drive might be low on space; continuing flush with caution...")
+
+    # Upper layer path
+    upper_dir = f"/mnt/ramdisk_{os.path.basename(directory)}"
+    if not os.path.exists(upper_dir):
+        logging.info(f"No upper directory found for {directory}. Maybe pure tmpfs fallback or not mounted.")
+        return
+
+    # Move everything from upper to lower
+    for root, dirs, files in os.walk(upper_dir):
+        for file in files:
+            file_path = os.path.join(root, file)
+            rel_path = os.path.relpath(file_path, upper_dir)
+            dest = os.path.join(overflow_dir, rel_path)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            try:
+                shutil.move(file_path, dest)
+                logging.info(f"Flushed {file_path} to {dest}")
+            except Exception as e:
+                logging.error(f"Failed to flush {file_path}: {e}")
+
+def check_free_space(path, min_percent=10):
+    """
+    Check if `path` has at least `min_percent` free space.
+    Returns True if enough space, False if below threshold.
+    """
+    try:
+        st = os.statvfs(path)
+        # total available to non-superuser is f_bavail
+        free_bytes = st.f_bavail * st.f_frsize
+        total_bytes = st.f_blocks * st.f_frsize
+        percent_free = (free_bytes / total_bytes) * 100 if total_bytes > 0 else 100
+        logging.info(f"Free space at {path}: {percent_free:.2f}%")
+        return percent_free >= min_percent
+    except Exception as e:
+        logging.error(f"Failed to check free space on {path}: {e}")
+        # If we can’t check, assume we can proceed
+        return True
+
+# ============================================================================
 # Nx Witness Log Management
-# ============================================================
-
+# ============================================================================
 def clean_nx_logs():
+    """
+    Removes old Nx Witness log archives (like *.zip) in NX_LOG_DIR.
+    """
     if os.path.isdir(NX_LOG_DIR):
         for root, dirs, files in os.walk(NX_LOG_DIR):
             for f in files:
@@ -208,91 +334,13 @@ def clean_nx_logs():
                     zip_path = os.path.join(root, f)
                     try:
                         os.remove(zip_path)
-                        logging.info(f"Deleted {zip_path} to reduce log storage.")
+                        logging.info(f"Deleted Nx log archive {zip_path} to reduce storage.")
                     except Exception as e:
                         logging.error(f"Failed to delete {zip_path}: {e}")
 
-# ============================================================
-# Deprecated NX Tmpfs Migration (One-Time Fix)
-# ============================================================
-
-def migrate_deprecated_nx_tmpfs():
-    config = load_config()
-    if config.get("deprecated_tmpfs_fixed"):
-        # Already fixed, do nothing
-        return
-
-    # Check current time
-    now = datetime.now()
-    if now.hour != 2:  # Only run between 2:00AM and 3:00AM
-        # Not in the allowed time window, skip for now
-        return
-
-    target_dir = "/opt/networkoptix/mediaserver/var/log"
-    is_mounted_tmpfs = False
-    try:
-        mount_out = run_command(["mount"], check=False).stdout
-        if "tmpfs on " + target_dir in mount_out:
-            is_mounted_tmpfs = True
-    except:
-        pass
-
-    fstab_file = "/etc/fstab"
-    with open(fstab_file, 'r') as f:
-        fstab_lines = f.readlines()
-
-    new_lines = []
-    fstab_modified = False
-    for line in fstab_lines:
-        if target_dir in line and "tmpfs" in line:
-            fstab_modified = True
-            continue
-        new_lines.append(line)
-
-    # Stop Nx Witness service before unmounting
-    run_command(["systemctl", "stop", SERVICE_NAME], check=False)
-
-    if is_mounted_tmpfs:
-        try:
-            run_command(["umount", target_dir], check=True)
-            logging.info(f"Unmounted tmpfs from {target_dir}.")
-        except Exception as e:
-            logging.error(f"Failed to unmount {target_dir}: {e}")
-            # If we fail to unmount, let's try lazy unmount as a last resort
-            try:
-                run_command(["umount", "-l", target_dir], check=True)
-                logging.info(f"Lazy unmounted tmpfs from {target_dir}.")
-            except Exception as ee:
-                logging.error(f"Lazy unmount also failed for {target_dir}: {ee}")
-                # If we still fail, we will retry tomorrow at 2am
-                return
-
-    if fstab_modified:
-        with open(fstab_file, 'w') as f:
-            f.writelines(new_lines)
-        logging.info("Removed deprecated tmpfs entry for NX logs from /etc/fstab.")
-
-    if not os.path.exists(target_dir):
-        os.makedirs(target_dir, exist_ok=True)
-
-    # Adjust ownership/permissions as needed
-    run_command(["chown", "networkoptix:networkoptix", target_dir], check=False)
-    run_command(["chmod", "755", target_dir], check=False)
-
-    # Restart Nx Witness service after fix
-    try:
-        run_command(["systemctl", "start", SERVICE_NAME], check=False)
-        logging.info(f"Restarted {SERVICE_NAME} after nx tmpfs migration.")
-    except Exception as e:
-        logging.error(f"Failed to restart {SERVICE_NAME} after nx tmpfs migration: {e}")
-
-    config["deprecated_tmpfs_fixed"] = True
-    save_config(config)
-
-# ============================================================
-# Drive Management
-# ============================================================
-
+# ============================================================================
+# Drive Management (from original script)
+# ============================================================================
 def is_boot_drive(drive):
     try:
         mount_info = run_command(['findmnt', '-n', '-o', 'SOURCE', '/']).stdout.strip()
@@ -320,7 +368,6 @@ def get_partitions(drive):
         output = result.stdout.strip().split('\n')
     except:
         return []
-
     partitions = []
     drive_name = os.path.basename(drive)
     for line in output:
@@ -367,10 +414,10 @@ def generate_mount_name(size_bytes, uuid):
 def run_fsck(partition):
     try:
         run_command(["e2fsck", "-fy", partition], check=True)
-        logging.info(f"Filesystem check and repair completed for {partition}.")
+        logging.info(f"Filesystem check/repair completed for {partition}")
         return True
     except subprocess.CalledProcessError as e:
-        logging.error(f"Filesystem check (e2fsck) failed for {partition}: {e}")
+        logging.error(f"Filesystem check failed for {partition}: {e}")
         return False
 
 def attempt_mount(partition, mount_point):
@@ -382,10 +429,17 @@ def attempt_mount(partition, mount_point):
         logging.error(f"Failed to mount {partition}: {e}")
         return False
 
+def format_partition(partition):
+    try:
+        run_command(["mkfs.ext4", "-F", partition], check=True)
+        logging.info(f"Formatted {partition} as ext4.")
+    except Exception as e:
+        logging.error(f"Failed to format {partition}: {e}")
+
 def attempt_repair_and_remount(partition, mount_point):
     fs_type = get_partition_fs_type(partition)
     if fs_type == FS_TYPE:
-        logging.info(f"Attempting to repair filesystem on {partition}...")
+        logging.info(f"Attempting fs repair on {partition}...")
         if run_fsck(partition):
             if attempt_mount(partition, mount_point):
                 return True
@@ -405,7 +459,7 @@ def attempt_repair_and_remount(partition, mount_point):
 def mount_partition(partition, config, size_bytes):
     uuid = get_device_uuid(partition)
     if not uuid:
-        logging.error(f"Could not determine UUID for {partition}. Skipping mount.")
+        logging.error(f"Could not determine UUID for {partition}. Skipping.")
         return
 
     if uuid in config:
@@ -419,6 +473,7 @@ def mount_partition(partition, config, size_bytes):
     os.makedirs(mount_point, exist_ok=True)
 
     if not is_mounted(partition):
+        # Update /etc/fstab if needed
         fstab_file = "/etc/fstab"
         with open(fstab_file, 'r') as f:
             fstab_contents = f.read()
@@ -445,13 +500,6 @@ def create_partition_and_format(drive):
     except Exception as e:
         logging.error(f"Failed to create partition on {drive}: {e}")
         return None
-
-def format_partition(partition):
-    try:
-        run_command(["mkfs.ext4", "-F", partition], check=True)
-        logging.info(f"Formatted {partition} as ext4.")
-    except Exception as e:
-        logging.error(f"Failed to format {partition}: {e}")
 
 def manage_drives():
     config = load_config()
@@ -481,10 +529,9 @@ def manage_drives():
 
     save_config(config)
 
-# ============================================================
+# ============================================================================
 # Service Management
-# ============================================================
-
+# ============================================================================
 def ensure_service_running(service_name):
     try:
         run_command(["systemctl", "enable", service_name], check=False)
@@ -492,47 +539,60 @@ def ensure_service_running(service_name):
         if status != "active":
             logging.info(f"{service_name} not running. Starting...")
             run_command(["systemctl", "start", service_name], check=False)
-        # Double check
         status = run_command(["systemctl", "is-active", service_name], check=False).stdout.strip()
         if status == "active":
             logging.info(f"{service_name} is running.")
         else:
-            logging.error(f"Failed to start {service_name}. Will retry in next iteration.")
+            logging.error(f"Failed to start {service_name}. Will retry next iteration.")
     except Exception as e:
         logging.error(f"Failed to ensure {service_name} is running: {e}")
 
-# ============================================================
+# ============================================================================
 # Main Execution Loop
-# ============================================================
-
+# ============================================================================
 def main():
-    last_log_update = time.time() - LOG_UPDATE_INTERVAL
-    last_script_update = time.time() - SCRIPT_UPDATE_INTERVAL
-
     env_type = detect_environment()
     skip_disks = should_skip_disk_management(env_type)
     if skip_disks:
-        logging.info(f"Detected environment type: {env_type}. Skipping disk management.")
+        logging.info(f"Detected env {env_type}. Skipping disk management.")
     else:
-        logging.info(f"Environment type: {env_type}. Proceeding with disk management.")
+        logging.info(f"Env type: {env_type}. Will manage disks normally.")
 
-    # One-time migration for deprecated nx tmpfs setup (only at 2:00AM - 3:00AM)
-    migrate_deprecated_nx_tmpfs()
-
-    # Initial setup tasks
+    # Journald ephemeral config
     configure_journald_volatile()
-    setup_tmpfs_mounts()
+
+    # Overlay for /var/log and /tmp
+    setup_overlayfs("/var/log", LOG_RAM_SIZE, fallback_tmpfs_size_mb=500, mode="755")
+    setup_overlayfs("/tmp", TMP_RAM_SIZE, fallback_tmpfs_size_mb=100, mode="1777")
+
+    # Nx Witness
     ensure_service_running(SERVICE_NAME)
+
+    last_script_update = time.time() - SCRIPT_UPDATE_INTERVAL
+    last_flush = time.time() - FLUSH_INTERVAL  # so it flushes ASAP if needed
 
     while True:
         current_time = time.time()
 
+        # Manage large drives (only if not in container)
         if not skip_disks:
             manage_drives()
 
         ensure_service_running(SERVICE_NAME)
         clean_nx_logs()
 
+        # Manage immediate large-file overflow
+        manage_file_overflow("/var/log")
+        manage_file_overflow("/tmp")
+
+        # Twice-a-day flush to external disk
+        if (current_time - last_flush) >= FLUSH_INTERVAL:
+            logging.info("Performing scheduled overlay flush...")
+            flush_overlay("/var/log")
+            flush_overlay("/tmp")
+            last_flush = current_time
+
+        # Self-update
         if current_time - last_script_update >= SCRIPT_UPDATE_INTERVAL:
             update_script()
             last_script_update = current_time
