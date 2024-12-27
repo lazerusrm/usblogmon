@@ -1,77 +1,77 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Check if the script is running as root
-if [ "$(id -u)" != "0" ]; then
-    echo "This script must be run as root. Trying to run with sudo..."
-    sudo "$0" "$@"
-    exit $?
-fi
+# ============================================================================
+# USB Log Manager Installer
+# For Debian/Ubuntu, including LXC containers where systemctl is available
+# ----------------------------------------------------------------------------
+# 1. Installs needed packages (python3, requests, pyudev, parted, e2fsprogs, curl).
+# 2. Downloads usb_log_manager.py to /opt/usblogmon (creates dir if needed).
+# 3. Creates a systemd service in /etc/systemd/system/usblogmon.service
+# 4. Enables and starts the usblogmon.service with systemd
+# ============================================================================
+set -euo pipefail
 
-# Define variables
-REPO_URL="https://raw.githubusercontent.com/lazerusrm/usblogmon/main"
-SCRIPT_NAME="usb_log_manager.py"
+SCRIPT_URL="https://raw.githubusercontent.com/lazerusrm/usblogmon/main/usb_log_manager.py"
 INSTALL_DIR="/opt/usblogmon"
+INSTALL_SCRIPT="${INSTALL_DIR}/usb_log_manager.py"
 SERVICE_FILE="/etc/systemd/system/usblogmon.service"
 
-echo "Updating package list..."
+echo "==============================================================="
+echo "         USB Log Manager Installer"
+echo "==============================================================="
+
+# 1. Check for root privileges
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "Error: Please run as root (sudo)!"
+    exit 1
+fi
+
+# 2. Update package list and install dependencies
+echo "Updating package list with apt-get update..."
 apt-get update -y
 
-# Ensure necessary system packages are installed
-DEPS=("python3" "python3-pip" "parted" "e2fsprogs" "curl")
-for pkg in "${DEPS[@]}"; do
-    if ! dpkg -l | grep -q "^ii\s\+$pkg\s"; then
-        echo "Installing $pkg..."
-        apt-get install -y $pkg
-    fi
-done
+echo "Installing required packages via apt-get ..."
+apt-get install -y \
+  python3 \
+  python3-requests \
+  python3-pyudev \
+  parted \
+  e2fsprogs \
+  curl
 
-# Install required Python packages if not present
-REQ_PY_MODULES=("pyudev" "requests")
-for mod in "${REQ_PY_MODULES[@]}"; do
-    if ! python3 -c "import $mod" &> /dev/null; then
-        echo "Installing Python module: $mod"
-        pip3 install "$mod"
-    fi
-done
+# 3. Create installation directory, download the python script
+echo "Creating installation directory at ${INSTALL_DIR} ..."
+mkdir -p "${INSTALL_DIR}"
 
-# Create installation directory
-echo "Creating installation directory at $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR"
-chown "$USER:$USER" "$INSTALL_DIR"
+echo "Downloading usb_log_manager.py from ${SCRIPT_URL} ..."
+curl -fsSL "${SCRIPT_URL}" -o "${INSTALL_SCRIPT}"
+chmod 755 "${INSTALL_SCRIPT}"
 
-# Download the updated script from GitHub
-echo "Downloading the script from $REPO_URL"
-curl -sSf -o "$INSTALL_DIR/$SCRIPT_NAME" "$REPO_URL/$SCRIPT_NAME"
-
-# Make the script executable
-chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
-
-# Create systemd service file
-echo "Creating systemd service file at $SERVICE_FILE"
-cat << EOF | tee $SERVICE_FILE
+# 4. Always create a systemd service
+echo "Creating systemd service file at ${SERVICE_FILE} ..."
+cat > "${SERVICE_FILE}" << EOF
 [Unit]
 Description=USB Log Monitoring and Drive Management Service
+After=network-online.target
 Wants=network-online.target
-After=network.target network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 $INSTALL_DIR/$SCRIPT_NAME
+ExecStart=/usr/bin/python3 ${INSTALL_SCRIPT}
 Restart=always
-RestartSec=10
-User=root
-Group=root
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Reload systemd to recognize new service
+echo "Reloading systemd daemon..."
 systemctl daemon-reload
 
-# Enable and start the new service
-systemctl enable usblogmon
-systemctl start usblogmon
+echo "Enabling and starting usblogmon.service ..."
+systemctl enable usblogmon.service
+systemctl start usblogmon.service
 
-echo "Installation completed. The 'usblogmon' service is now running."
-echo "The usb_log_manager.py script will now handle drive management, journald configuration, service checks, and self-updates automatically."
+echo "Service status (systemctl status usblogmon):"
+systemctl status usblogmon.service --no-pager
+
+echo "Done."
