@@ -575,5 +575,9 @@ echo " Timezone:        ${TIMEZONE_MSG}"
 echo " RMM:             ${RMM_MSG}"
 echo " Nx Witness:      ${NX_MSG}"
 echo " USB Log Manager: ${USB_MSG}"
-echo " Tailscale:       ${TAILSCALE_MSG}"
+if [[ "$IS_CONTAINER" = true ]]; then
+  echo " Tailscale:       SKIPPED: Container environment"
+else
+  echo " Tailscale:       ${TAILSCALE_MSG}"
+fi
 echo "*************************************************"
