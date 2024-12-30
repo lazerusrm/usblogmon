@@ -582,7 +582,7 @@ def ensure_service_running(service_name):
         if status == "active":
             logging.info(f"{service_name} is running.")
         else:
-            logging.error(f"Failed to start {service_name}. Will retry later.")
+            logging.error(f"Failed  to start {service_name}. Will retry later.")
     except Exception as e:
         logging.error(f"ensure_service_running error: {e}")
 

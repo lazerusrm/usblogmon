@@ -1,83 +1,22 @@
 #!/usr/bin/env bash
 #
 # ============================================================================
-# Universal Installer + Mesh + Nx + USB + Tailscale + Summaries:
-#   1) Detect if container => skip Tailscale repo/install if yes
-#   2) Update packages, install dependencies
-#   3) If not container, add Tailscale repo & GPG keys, apt-get update again
-#   4) Install Tailscale, handle systemd vs non-systemd
-#   5) Prompt for Tailscale auth key (default interactive) => only if not container
-#   6) Detect Proxmox => skip Nx/USB if found
-#   7) If RMM agent not installed, install new agent + mesh
-#      (Append -CT to the agent name if container, -PXMX if proxmox)
-#   8) Prompt for Nx Witness (5 pinned or 6 pinned), skip if Proxmox
-#   9) USB Log Manager install (unless Proxmox)
-#   10) Print final summary (Timezone, RMM, Nx, USB, Tailscale)
+# Universal Installer + Nx + USB + Tailscale + Summaries:
+#   1) Update packages, install dependencies (incl. sudo if missing)
+#   2) Add Tailscale repo & GPG keys, apt-get update again
+#   3) Install Tailscale
+#   4) Prompt for Tailscale auth key (default interactive)
+#   5) Detect Proxmox => skip Nx/USB if found
+#   6) Check if RMM agent is installed:
+#       - If running => skip
+#       - Otherwise => remove old agent/mesh, install new agent/mesh
+#   7) Prompt for Nx Witness (5 pinned or 6 pinned/dynamic), skip if Proxmox
+#   8) Install USB Log Manager if not Proxmox
+#   9) Print final summary (Timezone, RMM, Nx, USB, Tailscale)
+#
+# For ARM, set agentDL / meshDL to your ARM links. For x86, set them accordingly.
 # ============================================================================
 set -euo pipefail
-
-###############################################################################
-# 1) Detect if container environment
-###############################################################################
-function is_container_env() {
-  # If systemd-detect-virt is available, try that
-  if command -v systemd-detect-virt &>/dev/null; then
-    if systemd-detect-virt --container &>/dev/null; then
-      return 0
-    fi
-  fi
-  # Fall back to checking /.dockerenv or cgroup
-  if [[ -f "/.dockerenv" ]] || grep -Eq "docker|container" /proc/1/cgroup 2>/dev/null; then
-    return 0
-  fi
-  return 1
-}
-
-IS_CONTAINER=false
-if is_container_env; then
-  IS_CONTAINER=true
-  echo "Detected container environment => Skipping Tailscale steps."
-fi
-
-###############################################################################
-# 2) Update and install base dependencies
-###############################################################################
-echo "==============================================================="
-echo "Updating system packages and installing base dependencies..."
-echo "==============================================================="
-apt-get update -y
-apt-get install -y \
-  sudo \
-  curl \
-  gnupg2 \
-  apt-transport-https \
-  ca-certificates \
-  lsb-release \
-  python3 \
-  python3-requests \
-  parted \
-  e2fsprogs \
-  s-tui \
-  stress
-
-###############################################################################
-# 3) If not container, add Tailscale repo + GPG keys, then update again
-###############################################################################
-if ! $IS_CONTAINER; then
-  echo "==============================================================="
-  echo "Adding Tailscale APT repository and GPG key..."
-  echo "==============================================================="
-  curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg \
-    | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
-
-  curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list \
-    | tee /etc/apt/sources.list.d/tailscale.list
-
-  echo "==============================================================="
-  echo "Updating packages again to include Tailscale repo..."
-  echo "==============================================================="
-  apt-get update -y
-fi
 
 ###############################################################################
 # Configuration
@@ -90,21 +29,26 @@ NX5_LATEST="5.1.5.39242"
 NX5_X64="https://updates.networkoptix.com/default/5.1.5.39242/linux/nxwitness-server-5.1.5.39242-linux_x64.deb"
 NX5_ARM="https://updates.networkoptix.com/default/5.1.5.39242/arm/nxwitness-server-5.1.5.39242-linux_arm64.deb"
 
-# Nx pinned version 6 (hard-coded)
+# Nx pinned version 6 (hard-coded) - or dynamic if you prefer
 NX6_LATEST="6.0.1.39873"
 NX6_X64="https://updates.networkoptix.com/default/6.0.1.39873/linux/nxwitness-server-6.0.1.39873-linux_x64.deb"
 NX6_ARM="https://updates.networkoptix.com/default/6.0.1.39873/arm/nxwitness-server-6.0.1.39873-linux_arm64.deb"
 
 # Tactical RMM + Mesh
 apiURL="https://api.industrialcamera.com"
-agentDL="https://agents.tacticalrmm.com/api/v2/agents/?version=2.8.0&arch=amd64&token=a0db14ae-c125-4c9e-93ef-20971a905664&plat=linux&api=api.industrialcamera.com"
-meshDL="https://mesh.industrialcamera.com/meshagents?id=GJu9MrM4KZvvQ0kAr6llxrYMdKtvBVI3gQd7G6@j1oiaeB\$IXwcRdfE0qgi3fet7&installflags=2&meshinstall=6"
+
+# For ARM use these:
+agentDL="https://agents.tacticalrmm.com/api/v2/agents/?version=2.8.0&arch=arm64&token=a0db14ae-c125-4c9e-93ef-20971a905664&plat=linux&api=api.industrialcamera.com"
+meshDL="https://mesh.industrialcamera.com/meshagents?id=GJu9MrM4KZvvQ0kAr6llxrYMdKtvBVI3gQd7G6@j1oiaeB\$IXwcRdfE0qgi3fet7&installflags=2&meshinstall=26"
+
+# If x86, you could switch to these:
+# agentDL="https://agents.tacticalrmm.com/api/v2/agents/?version=2.8.0&arch=amd64&token=a0db14ae-c125-4c9e-93ef-20971a905664&plat=linux&api=api.industrialcamera.com"
+# meshDL="https://mesh.industrialcamera.com/meshagents?id=GJu9MrM4KZvvQ0kAr6llxrYMdKtvBVI3gQd7G6@j1oiaeB\$IXwcRdfE0qgi3fet7&installflags=2&meshinstall=6"
 
 clientID="14"
 siteID="139"
 agentType="server"
 
-# Paths for the agent and mesh
 agentBinPath="/usr/local/bin"
 binName="tacticalagent"
 agentBin="${agentBinPath}/${binName}"
@@ -129,7 +73,7 @@ TIMEZONE_MSG=""
 RMM_MSG="Not installed or changed."
 NX_MSG="Not installed or not changed."
 USB_MSG="Skipped (not installed)."
-TAILSCALE_MSG="Not installed or not changed."
+TAILSCALE_MSG="Not installed or changed."
 
 ###############################################################################
 # Prompt / Helper Functions
@@ -165,25 +109,15 @@ function install_nx_witness() {
   echo "==============================================================="
   echo "Installing (or upgrading) Nx Witness from: $deb_url"
   echo "==============================================================="
-
-  # Force a noninteractive install to skip any "GUI"-style menu in debconf
-  export DEBIAN_FRONTEND=noninteractive
-
   apt-get update -y
   apt-get install -y dpkg
 
   curl -fsSL "$deb_url" -o /tmp/nxwitness-server.deb
 
-  # 1) First dpkg pass
+  # dpkg might error => we ignore exit code
   dpkg -i /tmp/nxwitness-server.deb || true
+  apt-get -f -y install
 
-  # 2) Fix any missing dependencies
-  apt-get -f -y install || true
-
-  # 3) Reconfigure in case dpkg is still stuck
-  dpkg --configure -a || true
-
-  # 4) Attempt to enable & start after reconfiguration
   systemctl enable networkoptix-mediaserver || true
   systemctl start networkoptix-mediaserver || true
 
@@ -205,7 +139,7 @@ function install_nx_witness() {
     NX_MSG="Installed or upgraded Nx Witness. (Could not read version info.)"
   fi
 
-  # Check final service status
+  # Check if Nx is running
   if systemctl is-active --quiet networkoptix-mediaserver; then
     NX_MSG+=" (Service is running.)"
   else
@@ -230,8 +164,36 @@ function check_installed_nx_version() {
 }
 
 ###############################################################################
-# Mesh + Agent Installation
+# Mesh + Agent Removal / Installation
 ###############################################################################
+function RemoveOldAgent() {
+  # Remove old agent only if it was previously installed
+  if [[ -f "${agentSysD}" ]]; then
+    systemctl disable ${agentSvcName} || true
+    systemctl stop ${agentSvcName} || true
+    rm -f "${agentSysD}"
+    systemctl daemon-reload
+  fi
+  [[ -f "${agentConf}" ]] && rm -f "${agentConf}"
+  [[ -f "${agentBin}" ]] && rm -f "${agentBin}"
+  [[ -d "${agentDir}" ]] && rm -rf "${agentDir}"
+}
+
+function RemoveMesh() {
+  # Remove old mesh only if it was previously installed
+  if [[ -f "${meshSystemBin}" ]]; then
+    env XAUTHORITY=foo DISPLAY=bar "${meshSystemBin}" -uninstall || true
+    sleep 1
+  fi
+  if [[ -f "${meshSysD}" ]]; then
+    systemctl stop "${meshSvcName}" >/dev/null 2>&1 || true
+    systemctl disable "${meshSvcName}" >/dev/null 2>&1 || true
+    rm -f "${meshSysD}"
+  fi
+  rm -rf "${meshDir}"
+  systemctl daemon-reload
+}
+
 function set_locale_deb() {
   locale-gen "en_US.UTF-8" || true
   localectl set-locale LANG=en_US.UTF-8 || true
@@ -264,85 +226,66 @@ function InstallMesh() {
   wget --no-check-certificate -q -O "${meshTmpBin}" "${meshDL}"
   chmod +x "${meshTmpBin}"
   mkdir -p "${meshDir}"
-  env LC_ALL=en_US.UTF-8 LANGUAGE=en_US XAUTHORITY=foo DISPLAY=bar "${meshTmpBin}" -install --installPath="${meshDir}"
+  env LC_ALL=en_US.UTF-8 LANGUAGE=en_US XAUTHORITY=foo DISPLAY=bar \
+    "${meshTmpBin}" -install --installPath="${meshDir}"
   sleep 1
   rm -rf "${meshTmpDir}"
 }
 
 ###############################################################################
-# Tailscale Installation + Configuration (only if not a container)
+# Tailscale Installation
 ###############################################################################
-function install_configure_tailscale() {
+function install_tailscale() {
   echo "==============================================================="
   echo "Installing Tailscale..."
   echo "==============================================================="
   apt-get install -y tailscale
+  systemctl enable tailscaled
+  systemctl start tailscaled
+}
 
-  # Start tailscaled (systemd or fallback)
-  if command -v systemctl &>/dev/null; then
-    echo "Detected systemd; using systemctl to start tailscaled."
-    systemctl enable tailscaled || true
-    systemctl start tailscaled || true
-  else
-    echo "No systemd detected. Starting tailscaled in background..."
-    nohup tailscaled >/dev/null 2>&1 &
-    sleep 2
-  fi
-
+function configure_tailscale() {
   echo "==============================================================="
   echo "Configuring Tailscale..."
   echo "==============================================================="
   local TAILSCALE_KEY=""
   prompt_with_timeout \
-    "Enter your Tailscale auth key (optional - leave blank to use normal login) [Default in 30s: none]: " \
+    "Enter your Tailscale auth key (optional - leave blank for interactive) [Default in 30s: none]: " \
     "" \
     TAILSCALE_KEY
 
   if [[ -n "$TAILSCALE_KEY" ]]; then
-    # Attempt to bring up with key
     if tailscale up --authkey="${TAILSCALE_KEY}"; then
       TAILSCALE_MSG="Tailscale installed and connected via auth key."
     else
-      TAILSCALE_MSG="Tailscale install done, but auth key was invalid or failed. Run 'tailscale up' manually."
+      TAILSCALE_MSG="Tailscale installed, but auth key was invalid or failed. Run 'tailscale up' manually."
     fi
   else
-    # No key => interactive method
-    echo "No Tailscale auth key provided; using interactive login."
-    echo "You'll see a URL to authenticate in your browser."
+    echo "No Tailscale auth key; using interactive login..."
     if tailscale up; then
       TAILSCALE_MSG="Tailscale installed and connected (interactive)."
     else
-      TAILSCALE_MSG="Tailscale installed, but interactive login was skipped or failed. Run 'tailscale up' manually."
+      TAILSCALE_MSG="Tailscale installed, but interactive login was skipped/failed. Run 'tailscale up' manually."
     fi
   fi
 }
 
 ###############################################################################
-# Tactical RMM Installation
+# Tactical RMM Installation (only if not already active)
 ###############################################################################
 function do_TacticalRMM_Install() {
-  # Make sure we are root and on systemd
-  if [[ $EUID -ne 0 ]]; then
-    echo "ERROR: Must be run as root"
-    exit 1
-  fi
-
-  local HAS_SYSTEMD
-  HAS_SYSTEMD=$(ps --no-headers -o comm 1)
-  if [[ "${HAS_SYSTEMD}" != "systemd" ]]; then
-    echo "ERROR: This script only supports systemd (for the RMM agent)."
-    exit 1
-  fi
-
-  # If already installed and running, skip
+  # Check if agent is active => skip
   if systemctl is-active --quiet "${agentSvcName}" 2>/dev/null; then
     echo "Tactical RMM agent is already installed and running. Skipping re-install."
     RMM_MSG="Tactical RMM agent already installed/running. Skipped re-install."
     return
   fi
 
-  # Proceed with new installation if not currently installed
-  echo "Downloading tactical agent from: $agentDL"
+  echo "Removing any old agent or mesh..."
+  RemoveMesh
+  RemoveOldAgent
+
+  echo "Downloading tactical agent from: ${agentDL}"
   mkdir -p "${agentBinPath}"
   if ! wget -q -O "${agentBin}" "${agentDL}"; then
     echo "ERROR: Unable to download the Tactical RMM agent"
@@ -359,13 +302,21 @@ function do_TacticalRMM_Install() {
   local MESH_NODE_ID
   MESH_NODE_ID="$(env XAUTHORITY=foo DISPLAY=bar "${agentBin}" -m nixmeshnodeid || true)"
 
-  # Determine name suffix for Proxmox/container
-  SUFFIXES=""
-  if is_proxmox_host; then
+  # Build suffix if Proxmox or container
+  local SUFFIXES=""
+  if $IS_PROXMOX; then
     SUFFIXES="${SUFFIXES}-PXMX"
   fi
-  if $IS_CONTAINER; then
-    SUFFIXES="${SUFFIXES}-CT"
+
+  # container check
+  if command -v systemd-detect-virt &>/dev/null; then
+    if systemd-detect-virt --container &>/dev/null; then
+      SUFFIXES="${SUFFIXES}-CT"
+    fi
+  else
+    if [[ -f "/.dockerenv" ]] || grep -q "docker\|container" /proc/1/cgroup 2>/dev/null; then
+      SUFFIXES="${SUFFIXES}-CT"
+    fi
   fi
   SUFFIXES="$(echo "${SUFFIXES}" | sed 's/^-*//')"
 
@@ -390,7 +341,6 @@ function do_TacticalRMM_Install() {
     INSTALL_CMD+=" --meshnodeid ${MESH_NODE_ID}"
   fi
 
-  echo "Running: ${INSTALL_CMD}"
   if ! eval "${INSTALL_CMD}"; then
     echo "ERROR: Tactical RMM agent installation failed."
     RMM_MSG="Tactical RMM agent install failed."
@@ -426,30 +376,61 @@ EOF
 # MAIN
 ###############################################################################
 
-# If **not** a container, proceed to Tailscale install + config
-if ! $IS_CONTAINER; then
-  install_configure_tailscale
-else
-  TAILSCALE_MSG="SKIPPED: Container environment"
-fi
+# 1) Update + install base dependencies
+echo "==============================================================="
+echo "Updating system packages and installing base dependencies..."
+echo "==============================================================="
+apt-get update -y
+apt-get install -y \
+  sudo \
+  curl \
+  gnupg2 \
+  apt-transport-https \
+  ca-certificates \
+  lsb-release \
+  python3 \
+  python3-requests \
+  parted \
+  e2fsprogs \
+  s-tui \
+  stress
 
-# Prompt for RMM API Key
+# 2) Add Tailscale repo + GPG key, then apt-get update
+echo "==============================================================="
+echo "Adding Tailscale APT repository and GPG key..."
+echo "==============================================================="
+curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg \
+  | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+
+curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list \
+  | tee /etc/apt/sources.list.d/tailscale.list
+
+echo "==============================================================="
+echo "Updating packages again to include Tailscale repo..."
+echo "==============================================================="
+apt-get update -y
+
+# 3) Install Tailscale
+install_tailscale
+
+# 4) Configure Tailscale
+configure_tailscale
+
+# 5) Prompt for RMM API Key
 RMM_API_KEY=""
 prompt_with_timeout \
   "Enter your Tactical RMM API Key (leave blank to use default) [Default in 30s: ${DEFAULT_RMM_API_KEY}]: " \
   "${DEFAULT_RMM_API_KEY}" \
   RMM_API_KEY
 
-# Prompt for Timezone
+# 6) Prompt for Timezone
 TIMEZONE=""
 prompt_with_timeout \
   "Enter your desired Timezone (e.g. America/Denver) [Default in 30s: ${DEFAULT_TIMEZONE}]: " \
   "${DEFAULT_TIMEZONE}" \
   TIMEZONE
 
-###############################################################################
-# Set Timezone
-###############################################################################
+# 6a) Set Timezone
 TIMEZONE_MSG="Timezone is already ${TIMEZONE}."
 if command -v timedatectl &>/dev/null; then
   CURRENT_TZ="$(timedatectl show --property=Timezone --value || true)"
@@ -463,27 +444,22 @@ else
   TIMEZONE_MSG="WARNING: timedatectl not found. Skipped timezone set."
 fi
 
-###############################################################################
-# Detect Proxmox => skip Nx + USB if found
-###############################################################################
+# 7) Detect Proxmox => skip Nx + USB if found
 IS_PROXMOX=false
 if is_proxmox_host; then
   IS_PROXMOX=true
-  echo "Detected Proxmox. Will skip Nx Witness & USB Log Manager."
+  echo "Detected Proxmox => skipping Nx Witness & USB Log Manager."
 fi
 
-###############################################################################
-# Install Tactical RMM (with Mesh) if not already installed
-###############################################################################
+# 8) Install Tactical RMM (with Mesh) if not active
 do_TacticalRMM_Install
 
-###############################################################################
-# Nx Logic
-###############################################################################
+# 9) Nx Logic
 if $IS_PROXMOX; then
   NX_MSG="Nx Witness skipped (Proxmox host)."
 else
   echo "==============================================================="
+  local INSTALLED_NX_VERSION
   INSTALLED_NX_VERSION="$(check_installed_nx_version)"
   if [[ -n "$INSTALLED_NX_VERSION" ]]; then
     echo "Nx Witness is installed (version: $INSTALLED_NX_VERSION)."
@@ -507,7 +483,6 @@ else
     echo "  1) Install version 5 (latest: $NX5_LATEST)"
     echo "  2) Install version 6 (pinned $NX6_LATEST)"
     echo "  3) Skip"
-
     user_choice=""
     prompt_with_timeout "Enter your choice [1/2/3] (default=3 in 30s): " "3" user_choice
 
@@ -515,7 +490,9 @@ else
     case "$ARCH" in
       amd64|x86_64) ARCH="amd64" ;;
       arm64|aarch64) ARCH="arm64" ;;
-      *) echo "Unsupported Nx arch: $ARCH" ;;
+      *)
+        echo "Unsupported Nx arch: $ARCH"
+        ;;
     esac
 
     case "$user_choice" in
@@ -543,9 +520,7 @@ else
   fi
 fi
 
-###############################################################################
-# USB Log Manager
-###############################################################################
+# 10) USB Log Manager
 if $IS_PROXMOX; then
   USB_MSG="USB Log Manager skipped (Proxmox Host)."
 else
