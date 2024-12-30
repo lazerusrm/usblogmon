@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
 # ============================================================================
-# Combined Installer (with Proxmox Detection):
+# Combined Installer (with Proxmox Detection) + Dynamic Nx 6.x Download
 #   1) Set system timezone to MST (warn if not) and record in summary
 #   2) Check container -> append "-CT" to RMM agent name
 #   3) Install or skip Tactical RMM (with default key if no input in 30s)
 #   4) If not Proxmox, install USB Log Manager
 #   5) If not Proxmox, check or install Nx Witness
+#      - Nx 5 pinned at 5.1.5.39242
+#      - Nx 6 dynamically fetched from https://updates.networkoptix.com/default/
 #   6) Print final summary
 # ============================================================================
 set -euo pipefail
@@ -14,11 +16,8 @@ set -euo pipefail
 PROMPT_TIMEOUT=30
 DEFAULT_RMM_API_KEY="F7ZOUL3MUDRIPMZI49BTF5NNAR9GS0VO"
 
+# Nx 5 pinned at 5.1.5.39242
 NX5_LATEST="5.1.5.39242"
-NX6_LATEST="6.0.1.39873"
-
-NX6_X64="https://updates.networkoptix.com/default/6.0.1.39873/linux/nxwitness-server-6.0.1.39873-linux_x64.deb"
-NX6_ARM="https://updates.networkoptix.com/default/6.0.1.39873/arm/nxwitness-server-6.0.1.39873-linux_arm64.deb"
 NX5_X64="https://updates.networkoptix.com/default/5.1.5.39242/linux/nxwitness-server-5.1.5.39242-linux_x64.deb"
 NX5_ARM="https://updates.networkoptix.com/default/5.1.5.39242/arm/nxwitness-server-5.1.5.39242-linux_arm64.deb"
 
@@ -57,12 +56,61 @@ prompt_with_timeout() {
 }
 
 # ----------------------------------------------------------------------------
+# Dynamically Fetch Latest Nx 6.x Download URL
+# ----------------------------------------------------------------------------
+# This function uses a small Python snippet to:
+#   1) Scrape https://updates.networkoptix.com/default/ 
+#   2) Find the highest subfolder that starts with "6."
+#   3) Build a .deb URL in either "linux/" or "arm/" for "nxwitness-server-<VER>...deb"
+#   4) Print that URL to stdout
+function get_latest_nx6_url() {
+  local arch="$1"  # "amd64" or "arm64"
+
+  # We'll do an inline Python script. If python3-requests is missing, 
+  # our main script's "apt-get install" step should have installed it.
+  python3 <<EOF
+import sys
+import re
+import requests
+
+try:
+    resp = requests.get("https://updates.networkoptix.com/default/", timeout=10)
+    resp.raise_for_status()
+    text = resp.text
+except Exception as e:
+    sys.exit(f"ERROR: Unable to fetch Nx updates page: {e}")
+
+# Extract all subdirectory names that start with "6." (like 6.0.1.39873)
+pattern = r'href="(6\.\d+\.\d+\.\d+)/"'
+matches = re.findall(pattern, text)
+if not matches:
+    sys.exit("ERROR: No Nx 6.x versions found on updates.networkoptix.com")
+
+# We'll do a naive lexical sort that generally works for Nx's version scheme
+# e.g. "6.0.2.39999" > "6.0.1.39873"
+# For absolute correctness, consider a more sophisticated parse. 
+latest = sorted(matches, key=lambda v: [int(x) for x in v.split('.')])[-1]
+
+# Build the .deb filename
+if arch == "arm64":
+    folder = "arm"
+    suffix = "linux_arm64.deb"
+else:
+    folder = "linux"
+    suffix = "linux_x64.deb"
+
+url = f"https://updates.networkoptix.com/default/{latest}/{folder}/nxwitness-server-{latest}-{suffix}"
+print(url)
+EOF
+}
+
+# ----------------------------------------------------------------------------
 # Nx Witness Install/Upgrade
 # ----------------------------------------------------------------------------
 install_nx_witness() {
     local deb_url="$1"
     local old_ver="${2:-}"
-    local new_ver=""  
+    local new_ver=""
 
     echo "==============================================================="
     echo "Installing (or upgrading) Nx Witness from: $deb_url"
@@ -117,20 +165,26 @@ compare_versions_and_prompt_upgrade() {
     local installed_version="$1"
     local channel="$2"
 
-    local latest_version x64_url arm_url
     if [[ "$channel" == "5" ]]; then
-        latest_version="$NX5_LATEST"
-        x64_url="$NX5_X64"
-        arm_url="$NX5_ARM"
+        local latest_version="$NX5_LATEST"
+        # Nx 5 is pinned, so we have a single X64/ARM link
+        local x64_url="$NX5_X64"
+        local arm_url="$NX5_ARM"
     else
-        latest_version="$NX6_LATEST"
-        x64_url="$NX6_X64"
-        arm_url="$NX6_ARM"
+        # Nx 6 is dynamic, so fetch the newest x64 & arm64 URLs on demand
+        local x64_url
+        local arm_url
+        x64_url="$(get_latest_nx6_url "amd64")"
+        arm_url="$(get_latest_nx6_url "arm64")"
+        # We do a naive approach to find a "version" from that URL
+        local latest_version
+        latest_version="$(basename "$x64_url" | sed -E 's/nxwitness-server-([0-9.]+)-linux_x64.deb/\1/')"
     fi
 
     echo "Nx Witness is installed with version: $installed_version"
     echo "Latest $channel.x is: $latest_version"
 
+    # We can rely on dpkg --compare-versions to compare $installed_version vs $latest_version
     if dpkg --compare-versions "$installed_version" lt "$latest_version"; then
         echo "A newer Nx Witness $channel version is available."
         local upgrade_choice=""
@@ -290,6 +344,7 @@ else
   echo "Updating package list with apt-get update..."
   apt-get update -y
 
+  # Make sure we have python3, requests, etc., so our Nx scraping logic can run later
   echo "Installing required packages via apt-get ..."
   apt-get install -y \
     python3 \
@@ -361,7 +416,7 @@ else
     echo "==============================================================="
     echo "Do you want to install Nx Witness Media Server?"
     echo "  1) Install version 5 (latest: $NX5_LATEST)"
-    echo "  2) Install version 6 (latest: $NX6_LATEST)"
+    echo "  2) Install version 6 (latest: dynamic from Nx site)"
     echo "  3) Skip"
     user_choice=""
     prompt_with_timeout \
@@ -383,7 +438,11 @@ else
         fi
         ;;
       2)
-        echo "You chose Nx Witness version 6..."
+        echo "You chose Nx Witness version 6 (dynamic) ..."
+        # Dynamically fetch Nx 6 links
+        NX6_X64="$(get_latest_nx6_url "amd64")"
+        NX6_ARM="$(get_latest_nx6_url "arm64")"
+
         if [[ -n "$CONTAINER_SUFFIX" ]]; then
           install_nx_witness "$NX6_X64"
         else
