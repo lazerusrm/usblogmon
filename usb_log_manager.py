@@ -94,7 +94,7 @@ def detect_environment():
     If systemd-detect-virt fails, returns 'none'.
     """
     try:
-        result = run_command(["systemd-detect-virt", "--quiet"], check=False)
+        result = run_command(["systemd-detect-virt"], check=False)
         env_type = result.stdout.strip()
         return env_type if env_type else "none"
     except:
