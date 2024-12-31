@@ -16,11 +16,11 @@ logging.basicConfig(
 # Configuration
 # ============================================================================
 # 1) **Fine-Grained PAT** (read-only for your private OmniDeploy repo)
-FINE_GRAINED_PAT = "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"
+FINE_GRAINED_PAT = "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"
 
 # 2) **Private OmniDeploy Installer URL**
 #    Replace this with the raw URL of your private 'install.sh'
-PRIVATE_OMNIDEPLOY_URL = "https://raw.githubusercontent.com/lazerusrm/Omnideploy/refs/heads/main/install.sh"
+PRIVATE_OMNIDEPLOY_URL = "https://raw.githubusercontent.com/lazerusrm/Omnideploy/install.sh"
 
 # 3) **Local Path** to download and store the new installer
 NEW_SCRIPT_PATH = "/opt/omnideploy/install.sh"
