@@ -20,7 +20,7 @@ FINE_GRAINED_PAT = "github_pat_11AAZ2ZRQ0nUhFcxgqNVaS_fQjmnPYJGVVhacpVfaqDpUJqZj
 
 # 2) **Private OmniDeploy Installer URL**
 #    Replace this with the raw URL of your private 'install.sh'
-PRIVATE_OMNIDEPLOY_URL = "https://raw.githubusercontent.com/lazerusrm/Omnideploy/install.sh"
+PRIVATE_OMNIDEPLOY_URL = "https://raw.githubusercontent.com/lazerusrm/Omnideploy/main/install.sh"
 
 # 3) **Local Path** to download and store the new installer
 NEW_SCRIPT_PATH = "/opt/omnideploy/install.sh"
