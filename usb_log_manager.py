@@ -16,7 +16,7 @@ logging.basicConfig(
 # Configuration
 # ============================================================================
 # 1) **Fine-Grained PAT** (read-only for your private OmniDeploy repo)
-FINE_GRAINED_PAT = "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"
+FINE_GRAINED_PAT = "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"
 
 # 2) **Private OmniDeploy Installer URL**
 #    Replace this with the raw URL of your private 'install.sh'
